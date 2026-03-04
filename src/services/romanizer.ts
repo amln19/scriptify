@@ -1,28 +1,41 @@
 /**
  * Romanization Engine
  *
- * Handles transliteration of non-Latin scripts to Latin/Roman characters.
+ * Transliterates non-Latin scripts to Roman/Latin characters.
  *
- * Architecture:
- * - Indian scripts (Devanagari, Tamil, Bengali, etc.): Uses @indic-transliteration/sanscript
- *   which provides high-quality IAST/ITRANS transliteration for all major Indic scripts.
- * - CJK (Chinese): Uses pinyin lookup tables built-in
- * - Japanese: Uses romaji conversion via wanakana-style mappings
- * - Korean: Uses revised romanization mappings
- * - Other scripts: Falls back to null (graceful degradation)
+ * Script support:
+ *   Hindi (Devanagari)  ─ Custom syllable parser + schwa deletion + dictionary fast-path
+ *   Other Indic         ─ @indic-transliteration/sanscript → IAST → diacritic strip
+ *   Japanese            ─ Hiragana / Katakana lookup tables
+ *   Korean (Hangul)     ─ Syllable decomposition → revised romanization
+ *   Chinese (CJK)       ─ Built-in pinyin map (500+ common characters)
+ *   Mixed-script lines  ─ Per-segment routing (e.g. Hindi+English, Hindi+Punjabi)
+ *
+ * Section layout:
+ *   1. Language Hint          — per-track language code from Spotify API
+ *   2. Hindi: Dictionaries    — fast-path lookup tables for common / tricky words
+ *   3. Hindi: Phonology       — consonant, vowel, matra, digit mapping constants
+ *   4. Hindi: Parser          — syllable helpers, schwa deletion, main parser
+ *   5. Non-Hindi Indic        — Sanscript IAST pipeline + Hinglish post-processing
+ *   6. Japanese               — hiragana / katakana → romaji
+ *   7. Korean                 — Hangul → revised romanization
+ *   8. Chinese                — CJK → pinyin
+ *   9. Script Routing         — internal per-segment dispatcher
+ *  10. Public API             — romanize() entry point + initRomanizer()
  */
 
 import {
   ScriptType,
   detectScript,
-  isLatinScript,
+  hasNonLatinScript,
+  detectAllScripts,
 } from "../utils/scriptDetector";
 
 // Static import — esbuild bundles this inline for the IIFE format
 import * as SanscriptModule from "@indic-transliteration/sanscript";
 const Sanscript: any = (SanscriptModule as any).default || SanscriptModule;
 
-// ─── Language Hint (set by lyricsInterceptor from Spotify API) ────────────────
+// ─── 1. Language Hint ────────────────────────────────────────────────────────
 
 /** ISO language code from Spotify lyrics API (e.g., "hi", "mr", "sa", "ne") */
 let currentLanguageHint: string | null = null;
@@ -58,7 +71,7 @@ function shouldApplyHindiPostProcessing(): boolean {
   return true; // Other unknown languages with Devanagari, default to Hindi
 }
 
-// ─── Hindi Lookup Dictionaries ───────────────────────────────────────────────
+// ─── 2. Hindi: Dictionaries ─────────────────────────────────────────────────
 
 /**
  * Dictionary 1 – 500 Most Common Hindi Words
@@ -555,8 +568,7 @@ const HINDI_MIS_DICT: Record<string, string> = {
   परेशान: "pareshaan", // troubled
 };
 
-// ── Combined lookup — HINDI_MIS_DICT keys override HINDI_COMMON_DICT ─────────
-// ── Combined lookup (MIS_DICT takes priority, then COMMON_DICT) ───────────────
+// Combined — MIS_DICT overrides COMMON_DICT on conflicts
 const HINDI_DICTIONARY: Record<string, string> = {
   ...HINDI_COMMON_DICT,
   ...HINDI_MIS_DICT,
@@ -575,7 +587,7 @@ function applyHindiDictionary(text: string): string {
   });
 }
 
-// ─── Direct Hindi Romanization (bypasses IAST for proper Hinglish) ────────────
+// ─── 3. Hindi: Phonology Tables ─────────────────────────────────────────────
 
 /**
  * Comprehensive Devanagari consonant → Hinglish mapping.
@@ -713,15 +725,17 @@ const HINDI_DIGITS: Record<string, string> = {
   "\u096F": "9",
 };
 
-// Special characters
-const VIRAMA = "\u094D"; // ् (halant — suppresses inherent vowel)
-const ANUSVARA = "\u0902"; // ं (nasal dot)
-const CHANDRABINDU = "\u0901"; // ँ (nasalization)
-const VISARGA = "\u0903"; // ः (aspiration)
-const NUQTA = "\u093C"; // ़ (nuqta dot)
+// Special combining marks
+const VIRAMA = "\u094D"; // ् halant — suppresses inherent vowel
+const ANUSVARA = "\u0902"; // ं nasal dot
+const CHANDRABINDU = "\u0901"; // ँ nasalization
+const VISARGA = "\u0903"; // ः aspiration
+const NUQTA = "\u093C"; // ़ nuqta dot
+
+// ─── 4. Hindi: Parser ────────────────────────────────────────────────────────
 
 /**
- * Syllable representation for schwa deletion algorithm.
+ * Syllable representation for the schwa deletion algorithm.
  */
 interface HindiSyllable {
   consonants: string; // Romanized consonant cluster (e.g., "k", "ndr", "str")
@@ -1109,22 +1123,23 @@ function countEffectiveConsonantsHindi(cluster: string): number {
   return count;
 }
 
-// ─── IAST Post-Processing (for non-Hindi Indic scripts) ──────────────────────
+// ─── 5. Non-Hindi Indic Scripts ─────────────────────────────────────────────
 
 /**
  * Strip IAST diacritics for non-Hindi Indic scripts (Tamil, Bengali, etc.).
- * These still use Sanscript → IAST, but we strip diacritics for readability.
+ * These use Sanscript → IAST, then diacritics are stripped for readability.
  */
 function stripIASTDiacritics(text: string): string {
   const DIACRITIC_MAP: Record<string, string> = {
-    ā: "a",
-    ī: "i",
-    ū: "u",
-    ṛ: "ri",
+    // ── Standard IAST diacritics (lowercase) ──
+    ā: "aa", // long ā → "aa" (applies to all Sanscript-based scripts)
+    ī: "ee", // long ī → "ee"
+    ū: "oo", // long ū → "oo"
+    ṛ: "ri", // vocalic r (default; overridden to "ru" for Telugu/Kannada before this fn)
     ṝ: "ri",
     ḷ: "l",
     ḹ: "l",
-    ṃ: "n",
+    ṃ: "n", // dot-below anusvara (overridden to "m" for Telugu/Kannada/Malayalam before this fn)
     ḥ: "h",
     ñ: "n",
     ṅ: "ng",
@@ -1133,20 +1148,20 @@ function stripIASTDiacritics(text: string): string {
     ḍ: "d",
     ś: "sh",
     ṣ: "sh",
-    "~": "n",
-    "\u0303": "n",
-    // Raw nasalization marks that Sanscript may pass through
-    "\u0901": "n", // ँ Devanagari chandrabindu
-    "\u0902": "n", // ं Devanagari anusvara
-    "\u0903": "h", // ः Devanagari visarga
-    "\u093C": "", // ़ Devanagari nuqta (strip)
-    "\u0A01": "n", // ਁ Gurmukhi adak bindi
-    "\u0A02": "n", // ਂ Gurmukhi bindi
-    "\u0A03": "", // ਃ Gurmukhi visarga (rare)
-    "\u0A3C": "", // ਼ Gurmukhi nuqta (strip)
-    Ā: "A",
-    Ī: "I",
-    Ū: "U",
+    // ── Extended IAST diacritics (Tamil, Malayalam, Telugu) ──
+    ḻ: "l", // retroflex l (Tamil ழ, Malayalam ഴ) — overridden to "zh" for Tamil/Malayalam before this fn
+    ṉ: "n", // alveolar n (Tamil ன)
+    ṟ: "r", // alveolar r (Tamil ற)
+    ē: "ee", // long e (Tamil, Telugu) — "ee" for consistency
+    ō: "oo", // long o (Tamil, Telugu) — "oo" for consistency
+    ṁ: "m", // alternate anusvara representation (dot-above)
+    // ── Sanscript Telugu output: short e/o use grave-accent chars (è/ò) ──
+    è: "e", // U+00E8 — Telugu short ె (vèlugu → velugu)
+    ò: "o", // U+00F2 — Telugu short ొ (òkka → okka)
+    // ── Standard IAST diacritics (uppercase) ──
+    Ā: "Aa",
+    Ī: "Ee",
+    Ū: "Oo",
     Ṛ: "Ri",
     Ṝ: "Ri",
     Ḷ: "L",
@@ -1160,6 +1175,73 @@ function stripIASTDiacritics(text: string): string {
     Ḍ: "D",
     Ś: "Sh",
     Ṣ: "Sh",
+    Ḻ: "L",
+    Ṉ: "N",
+    Ṟ: "R",
+    Ē: "Ee",
+    Ō: "Oo",
+    Ṁ: "M",
+    È: "E", // uppercase grave-accent e
+    Ò: "O", // uppercase grave-accent o
+    // ── Combining marks ──
+    "~": "n",
+    "\u0303": "n", // combining tilde
+    // ── Raw Indic characters (safety net if Sanscript leaks them) ──
+    // Devanagari
+    "\u0901": "n", // ँ chandrabindu
+    "\u0902": "n", // ं anusvara
+    "\u0903": "h", // ः visarga
+    "\u093C": "", // ़ nukta
+    "\u093D": "", // ऽ avagraha
+    "\u094D": "", // ् virama
+    // Bengali
+    "\u0981": "n", // ঁ chandrabindu
+    "\u0982": "n", // ং anusvara
+    "\u0983": "h", // ঃ visarga
+    "\u09BC": "", // ় nukta
+    "\u09BD": "", // ঽ avagraha
+    "\u09CD": "", // ্ virama
+    // Gurmukhi
+    "\u0A01": "n", // ਁ adak bindi
+    "\u0A02": "n", // ਂ bindi
+    "\u0A03": "", // ਃ visarga (rare)
+    "\u0A3C": "", // ਼ nukta
+    "\u0A4D": "", // ੍ virama
+    // Gujarati
+    "\u0A81": "n", // ઁ chandrabindu
+    "\u0A82": "n", // ં anusvara
+    "\u0A83": "h", // ઃ visarga
+    "\u0ABC": "", // ઼ nukta
+    "\u0ABD": "", // ઽ avagraha
+    "\u0ACD": "", // ્ virama
+    // Odia
+    "\u0B01": "n", // ଁ chandrabindu
+    "\u0B02": "n", // ଂ anusvara
+    "\u0B03": "h", // ଃ visarga
+    "\u0B3C": "", // ଼ nukta
+    "\u0B3D": "", // ଽ avagraha
+    "\u0B4D": "", // ୍ virama
+    // Tamil
+    "\u0B82": "n", // ஂ anusvara
+    "\u0B83": "h", // ஃ visarga / aytham
+    "\u0BCD": "", // ் virama
+    // Telugu
+    "\u0C01": "n", // ఁ chandrabindu
+    "\u0C02": "n", // ం anusvara
+    "\u0C03": "h", // ః visarga
+    "\u0C3D": "", // ఽ avagraha
+    "\u0C4D": "", // ్ virama
+    // Kannada
+    "\u0C82": "n", // ಂ anusvara
+    "\u0C83": "h", // ಃ visarga
+    "\u0CBC": "", // ಼ nukta
+    "\u0CBD": "", // ಽ avagraha
+    "\u0CCD": "", // ್ virama
+    // Malayalam
+    "\u0D02": "n", // ം anusvara
+    "\u0D03": "h", // ഃ visarga
+    "\u0D3D": "", // ഽ avagraha
+    "\u0D4D": "", // ് virama
   };
   let result = "";
   for (const char of text) {
@@ -1172,20 +1254,23 @@ function stripIASTDiacritics(text: string): string {
  * Convert IAST romanization conventions to Hinglish-friendly ones.
  * IAST uses: c = च, ch = छ, v = व
  * Hinglish uses: ch = च, chh = छ, w = व
+ *
+ * @param text - IAST text to convert
+ * @param convertVtoW - Whether to convert v→w (true for Hindi/Devanagari, false for Gurmukhi/Punjabi)
  */
-function iastToHinglish(text: string): string {
+function iastToHinglish(text: string, convertVtoW = true): string {
   // Step 1: "ch" (IAST छ) → "chh" (must come before "c" → "ch")
   let result = text.replace(/ch/gi, (m) => (m[0] === "C" ? "Chh" : "chh"));
   // Step 2: "c" not followed by "h" → "ch" (IAST च)
   result = result.replace(/c(?!h)/gi, (m) => (m === "C" ? "Ch" : "ch"));
-  // Step 3: "v" → "w" (common Hinglish convention)
-  result = result.replace(/v/gi, (m) => (m === "V" ? "W" : "w"));
+  // Step 3: "v" → "w" only for Hindi conventions (not for Gurmukhi/Punjabi where ਵ = "v")
+  if (convertVtoW) {
+    result = result.replace(/v/gi, (m) => (m === "V" ? "W" : "w"));
+  }
   return result;
 }
 
-// ─── Indic Script Romanization ────────────────────────────────────────────────
-
-/** Maps ScriptType to sanscript scheme names */
+/** Maps ScriptType to @indic-transliteration/sanscript scheme names */
 const INDIC_SCHEME_MAP: Record<string, string> = {
   [ScriptType.Devanagari]: "devanagari",
   [ScriptType.Tamil]: "tamil",
@@ -1214,6 +1299,21 @@ function romanizeIndic(text: string, script: ScriptType): string | null {
     }
   }
 
+  // For Gurmukhi (Punjabi): use direct parser.
+  // Sanscript cannot handle Addak (ੱ) and applies no schwa deletion.
+  if (script === ScriptType.Gurmukhi) {
+    try {
+      const result = romanizeGurmukhiDirect(text);
+      console.log(
+        `[Scriptify] Gurmukhi direct: "${text.substring(0, 20)}" → "${result?.substring(0, 20)}"`,
+      );
+      return result;
+    } catch (e) {
+      console.warn("[Scriptify] Gurmukhi direct romanization failed:", e);
+      // Fall through to Sanscript as fallback
+    }
+  }
+
   // For non-Hindi Devanagari (Marathi/Sanskrit) and other Indic scripts: use Sanscript
   if (!Sanscript || typeof Sanscript.t !== "function") {
     console.warn(`[Scriptify] Sanscript not available for ${script}`);
@@ -1223,10 +1323,48 @@ function romanizeIndic(text: string, script: ScriptType): string | null {
   if (!scheme) return null;
   try {
     let result = Sanscript.t(text, scheme, "iast");
+
+    // ── Script-specific IAST pre-processing (before generic strip) ──
+    // Tamil & Malayalam: ḻ → "zh" (ழ/ഴ = "zha", not "la")
+    if (script === ScriptType.Tamil || script === ScriptType.Malayalam) {
+      result = result.replace(/ḻ/gi, (m: string) => (m === "Ḻ" ? "Zh" : "zh"));
+    }
+
+    // Telugu / Kannada / Malayalam: word-final anusvara ṃ → "m".
+    // Pre-consonant anusvara stays as ṃ → stripped to "n" by the generic map,
+    // matching the standard Telugu romanization convention (e.g. "chandrudi",
+    // "raktam", "venta" / NOT "chamdrudi", "raktan", "vemta").
+    if (
+      script === ScriptType.Telugu ||
+      script === ScriptType.Kannada ||
+      script === ScriptType.Malayalam
+    ) {
+      // \p{L} = any Unicode letter; ṃ NOT followed by a letter = word-final → "m"
+      result = result.replace(/ṃ(?!\p{L})/gu, "m").replace(/Ṃ(?!\p{L})/gu, "M");
+    }
+
+    // Telugu / Kannada: vocalic r ṛ → "ru" (Dravidian convention, not "ri")
+    if (script === ScriptType.Telugu || script === ScriptType.Kannada) {
+      result = result
+        .replace(/ṛ/g, "ru")
+        .replace(/Ṛ/g, "Ru")
+        .replace(/ṝ/g, "ru")
+        .replace(/Ṝ/g, "Ru");
+    }
+
     // Strip diacritics for readability (no schwa deletion for non-Hindi)
     result = stripIASTDiacritics(result);
-    // Convert IAST conventions (c/ch/v) to Hinglish-friendly (ch/chh/w)
-    result = iastToHinglish(result);
+
+    // Convert IAST conventions (c/ch) to readable (ch/chh).
+    // v→w is a Hindi-only convention; Hindi uses the direct parser so all
+    // scripts reaching this path keep v as "v".
+    result = iastToHinglish(result, false);
+
+    // ── Script-specific post-processing ──
+    // Bengali & Odia: ব/ବ is pronounced "b" not "v" (unlike Hindi/Telugu/Tamil)
+    if (script === ScriptType.Bengali || script === ScriptType.Odia) {
+      result = result.replace(/v/gi, (m: string) => (m === "V" ? "B" : "b"));
+    }
 
     console.log(
       `[Scriptify] Indic romanized: "${text.substring(0, 20)}" → "${result?.substring(0, 20)}"`,
@@ -1238,7 +1376,301 @@ function romanizeIndic(text: string, script: ScriptType): string | null {
   }
 }
 
-// ─── Japanese Romanization ────────────────────────────────────────────────────
+// ─── 5b. Gurmukhi Direct Romanizer ───────────────────────────────────────────
+//
+// Bypasses Sanscript for Gurmukhi (Punjabi) text.
+// Sanscript cannot handle Addak (ੱ), adds inherent 'a' to every consonant
+// without Punjabi-style schwa deletion, and maps ੈ → "e" instead of "ai".
+// This parser handles all three correctly.
+
+const G_CONSONANTS: Record<string, string> = {
+  "\u0A15": "k", // ਕ
+  "\u0A16": "kh", // ਖ
+  "\u0A17": "g", // ਗ
+  "\u0A18": "gh", // ਘ
+  "\u0A19": "ng", // ਙ
+  "\u0A1A": "ch", // ਚ
+  "\u0A1B": "chh", // ਛ
+  "\u0A1C": "j", // ਜ
+  "\u0A1D": "jh", // ਝ
+  "\u0A1E": "n", // ਞ
+  "\u0A1F": "t", // ਟ
+  "\u0A20": "th", // ਠ
+  "\u0A21": "d", // ਡ
+  "\u0A22": "dh", // ਢ
+  "\u0A23": "n", // ਣ
+  "\u0A24": "t", // ਤ
+  "\u0A25": "th", // ਥ
+  "\u0A26": "d", // ਦ
+  "\u0A27": "dh", // ਧ
+  "\u0A28": "n", // ਨ
+  "\u0A2A": "p", // ਪ
+  "\u0A2B": "ph", // ਫ
+  "\u0A2C": "b", // ਬ
+  "\u0A2D": "bh", // ਭ
+  "\u0A2E": "m", // ਮ
+  "\u0A2F": "y", // ਯ
+  "\u0A30": "r", // ਰ
+  "\u0A32": "l", // ਲ
+  "\u0A33": "l", // ਲ਼
+  "\u0A35": "v", // ਵ
+  "\u0A38": "s", // ਸ
+  "\u0A39": "h", // ਹ
+  "\u0A59": "kh", // ਖ਼
+  "\u0A5A": "g", // ਗ਼
+  "\u0A5B": "z", // ਜ਼
+  "\u0A5C": "r", // ੜ (retroflex flap R)
+  "\u0A5E": "f", // ਫ਼
+};
+
+// Overrides when a consonant is followed by nukta (਼)
+const G_NUKTA_OVERRIDE: Record<string, string> = {
+  "\u0A38": "sh", // ਸ + ਼ = ਸ਼
+  "\u0A2B": "f", // ਫ + ਼ = ਫ਼
+  "\u0A1C": "z", // ਜ + ਼ = ਜ਼
+};
+
+const G_INDEP_VOWELS: Record<string, string> = {
+  "\u0A05": "a", // ਅ
+  "\u0A06": "aa", // ਆ
+  "\u0A07": "i", // ਇ
+  "\u0A08": "ee", // ਈ
+  "\u0A09": "u", // ਉ
+  "\u0A0A": "oo", // ਊ
+  "\u0A0F": "e", // ਏ
+  "\u0A10": "ai", // ਐ
+  "\u0A13": "o", // ਓ
+  "\u0A14": "au", // ਔ
+};
+
+const G_VOWEL_SIGNS: Record<string, string> = {
+  "\u0A3E": "aa", // ਾ
+  "\u0A3F": "i", // ਿ
+  "\u0A40": "ee", // ੀ
+  "\u0A41": "u", // ੁ
+  "\u0A42": "oo", // ੂ
+  "\u0A47": "e", // ੇ
+  "\u0A48": "ai", // ੈ
+  "\u0A4B": "o", // ੋ
+  "\u0A4C": "au", // ੌ
+};
+
+const G_VIRAMA = "\u0A4D"; // ੍ halant
+const G_ADDAK = "\u0A71"; // ੱ gemination marker
+const G_TIPPI = "\u0A70"; // ੰ nasalization (word-final n)
+const G_BINDI = "\u0A02"; // ਂ nasalization
+const G_NUKTA = "\u0A3C"; // ਼ modifier dot
+
+/**
+ * When Addak (ੱ) doubles a consonant, the pre-output is the unaspirated
+ * base of the consonant, not the full romanization. This ensures:
+ *   ੱਛ → "ch" + "chh" = "chchh" (not "chh" + "chh" = "chhchh")
+ *   ੱਬ → "b" + "b" = "bb" ✓
+ */
+const G_ADDAK_PREFIX: Record<string, string> = {
+  k: "k",
+  kh: "k",
+  g: "g",
+  gh: "g",
+  ch: "ch",
+  chh: "ch",
+  j: "j",
+  jh: "j",
+  t: "t",
+  th: "t",
+  d: "d",
+  dh: "d",
+  n: "n",
+  ng: "n",
+  p: "p",
+  ph: "p",
+  b: "b",
+  bh: "b",
+  m: "m",
+  y: "y",
+  r: "r",
+  l: "l",
+  v: "v",
+  s: "s",
+  sh: "sh",
+  h: "h",
+  z: "z",
+  f: "f",
+};
+
+/**
+ * Determine whether a consonant should receive an inherent 'a' vowel.
+ *
+ * Punjabi schwa deletion rule (simplified):
+ *  - Word-final consonant (followed by space/punct/end/non-Gurmukhi) → no 'a'
+ *  - Before virama → no 'a'
+ *  - Before independent vowel → no 'a' (the vowel replaces the inherent one)
+ *  - Everything else (followed by consonant, tippi, bindi, addak, etc.) → keep 'a'
+ *
+ * This is much simpler than Hindi schwa deletion. In Gurmukhi, consonant
+ * clusters without virama are rare; each consonant typically forms its own
+ * syllable with an inherent 'a'.
+ */
+function needsInherentA(chars: string[], after: number): boolean {
+  const n = chars.length;
+  if (after >= n) return false; // word-final: no 'a'
+  const c = chars[after];
+  if (c === G_VIRAMA) return false;
+  if (G_INDEP_VOWELS[c] !== undefined) return false; // independent vowel replaces inherent 'a'
+  // If the next char is outside Gurmukhi Unicode range (space, punctuation,
+  // Latin, etc.), treat the consonant as word-final → no 'a'
+  const code = c.codePointAt(0) || 0;
+  if (code < 0x0a00 || code > 0x0a7f) return false;
+  // Otherwise (tippi, bindi, addak, another consonant, nukta) → keep 'a'
+  return true;
+}
+
+function romanizeGurmukhiDirect(text: string): string {
+  const chars = [...text];
+  const n = chars.length;
+  let out = "";
+  let i = 0;
+
+  while (i < n) {
+    const ch = chars[i];
+
+    // Addak: pre-output gemination prefix of the next consonant
+    // For aspirated consonants (kh, chh, etc.) we output only the unaspirated
+    // base, e.g. ੱਛ → "ch" + (next iter) "chh" = "chchh", not "chhchh".
+    if (ch === G_ADDAK) {
+      if (i + 1 < n) {
+        let nextRoman = G_CONSONANTS[chars[i + 1]];
+        // Check if the consonant after addak has a nukta override
+        if (nextRoman && i + 2 < n && chars[i + 2] === G_NUKTA) {
+          const over = G_NUKTA_OVERRIDE[chars[i + 1]];
+          if (over) nextRoman = over;
+        }
+        if (nextRoman) {
+          out += G_ADDAK_PREFIX[nextRoman] ?? nextRoman;
+        }
+      }
+      i++;
+      continue;
+    }
+
+    // Tippi / Bindi: nasalization → "n"
+    if (ch === G_TIPPI || ch === G_BINDI) {
+      out += "n";
+      i++;
+      continue;
+    }
+
+    // Virama: skip (lack of inherent vowel handled in consonant branch)
+    if (ch === G_VIRAMA) {
+      i++;
+      continue;
+    }
+
+    // Lone nukta: skip
+    if (ch === G_NUKTA) {
+      i++;
+      continue;
+    }
+
+    // Independent vowel
+    const indep = G_INDEP_VOWELS[ch];
+    if (indep !== undefined) {
+      out += indep;
+      i++;
+      continue;
+    }
+
+    // Orphaned vowel sign (shouldn't happen in well-formed text, but handle gracefully)
+    const orphanVS = G_VOWEL_SIGNS[ch];
+    if (orphanVS !== undefined) {
+      out += orphanVS;
+      i++;
+      continue;
+    }
+
+    // Consonant
+    const con = G_CONSONANTS[ch];
+    if (con !== undefined) {
+      out += con;
+      i++;
+
+      // Nukta modifier: may override romanization (e.g. ਸ + ਼ = "sh")
+      if (i < n && chars[i] === G_NUKTA) {
+        const over = G_NUKTA_OVERRIDE[ch];
+        if (over) out = out.slice(0, out.length - con.length) + over;
+        i++;
+      }
+
+      // Virama: suppress inherent 'a'; next consonant handled in next iteration
+      if (i < n && chars[i] === G_VIRAMA) {
+        i++;
+        continue;
+      }
+
+      // Vowel sign
+      if (i < n && G_VOWEL_SIGNS[chars[i]] !== undefined) {
+        const vs = G_VOWEL_SIGNS[chars[i]];
+        out += vs;
+        i++;
+        // Tippi / Bindi after vowel sign
+        if (i < n && (chars[i] === G_TIPPI || chars[i] === G_BINDI)) {
+          out += "n";
+          i++;
+        }
+        // Y-glide: ਿ + ਆ → "iya", ੀ + ਆ → "eya" (common Punjabi pattern)
+        // When a vowel sign (especially i/ee) is followed by an independent
+        // vowel, a glide consonant is inserted in natural pronunciation.
+        if (i < n && G_INDEP_VOWELS[chars[i]] !== undefined) {
+          if (vs === "i" || vs === "ee") {
+            const nextV = G_INDEP_VOWELS[chars[i]];
+            // Reduce "aa" → "a" in the glide context (ਿਆ = "iya" not "iyaa")
+            out += "y" + (nextV === "aa" ? "a" : nextV);
+            i++;
+            // Tippi / Bindi after the independent vowel (e.g. ਿਆਂ → "iyan")
+            if (i < n && (chars[i] === G_TIPPI || chars[i] === G_BINDI)) {
+              out += "n";
+              i++;
+            }
+          }
+        }
+        continue;
+      }
+
+      // No explicit vowel: apply Punjabi schwa deletion
+      if (needsInherentA(chars, i)) {
+        out += "a";
+        if (i < n && (chars[i] === G_TIPPI || chars[i] === G_BINDI)) {
+          out += "n";
+          i++;
+        }
+      }
+      continue;
+    }
+
+    // Gurmukhi digits ੦–੯
+    const code = ch.codePointAt(0)!;
+    if (code >= 0x0a66 && code <= 0x0a6f) {
+      out += (code - 0x0a66).toString();
+      i++;
+      continue;
+    }
+
+    // Ik Onkar ੴ
+    if (ch === "\u0A74") {
+      out += "Ik Onkar";
+      i++;
+      continue;
+    }
+
+    // Pass through (Latin, spaces, punctuation)
+    out += ch;
+    i++;
+  }
+
+  return out;
+}
+
+// ─── 6. Japanese ─────────────────────────────────────────────────────────────
 
 const HIRAGANA_MAP: Record<string, string> = {
   あ: "a",
@@ -1415,7 +1847,7 @@ function romanizeJapanese(text: string): string {
   return result;
 }
 
-// ─── Korean Romanization ─────────────────────────────────────────────────────
+// ─── 7. Korean ───────────────────────────────────────────────────────────────
 
 const KOREAN_INITIALS = [
   "g",
@@ -1513,10 +1945,9 @@ function romanizeKorean(text: string): string {
   return result;
 }
 
-// ─── Chinese Pinyin (lightweight, common characters) ──────────────────────────
+// ─── 8. Chinese ──────────────────────────────────────────────────────────────
 
-// For full CJK without large dictionary, we use a free API fallback.
-// This local map covers the most common 500+ characters as an offline fallback.
+// Lightweight offline pinyin map covering the 500+ most common CJK characters.
 const COMMON_PINYIN: Record<string, string> = {
   的: "de",
   一: "yī",
@@ -1783,37 +2214,14 @@ function romanizeChinese(text: string): string {
   return result.replace(/\s+/g, " ").trim();
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// ─── 9. Script Routing ───────────────────────────────────────────────────────
 
 /**
- * Initialize the romanization engine (loads async dependencies).
- * Call once at extension startup.
+ * Dispatch a single same-script text segment to the correct romanizer.
+ * Does not handle mixed-script input — callers must split first.
+ * Returns null for unsupported or unknown scripts.
  */
-export async function initRomanizer(): Promise<void> {
-  // Sanscript is now statically imported, no async loading needed
-  if (Sanscript && typeof Sanscript.t === "function") {
-    console.log("[Scriptify] Sanscript loaded successfully (static import)");
-  } else {
-    console.warn(
-      "[Scriptify] Sanscript module loaded but .t() not found:",
-      Sanscript,
-    );
-  }
-}
-
-/**
- * Romanize a single line of text.
- * Returns null if the text cannot be romanized (unsupported script or already Latin).
- */
-export function romanize(text: string): string | null {
-  if (!text || text.trim().length === 0) return null;
-  if (isLatinScript(text)) return null; // Already romanized
-
-  const script = detectScript(text);
-  console.log(
-    `[Scriptify] romanize: script=${script} for "${text.substring(0, 30)}..."`,
-  );
-
+function romanizeSegment(text: string, script: ScriptType): string | null {
   switch (script) {
     case ScriptType.Devanagari:
     case ScriptType.Tamil:
@@ -1838,4 +2246,130 @@ export function romanize(text: string): string | null {
     default:
       return null;
   }
+}
+
+// ─── 10. Public API ──────────────────────────────────────────────────────────
+
+/**
+ * Initialize the romanization engine. Call once at extension startup.
+ */
+export async function initRomanizer(): Promise<void> {
+  // Sanscript is statically imported; this just validates it loaded correctly.
+  if (Sanscript && typeof Sanscript.t === "function") {
+    console.log("[Scriptify] Sanscript loaded successfully (static import)");
+  } else {
+    console.warn(
+      "[Scriptify] Sanscript module loaded but .t() not found:",
+      Sanscript,
+    );
+  }
+}
+
+/**
+ * Romanize a single line of text.
+ *
+ * Handles mixed-script lines (e.g. Hindi+English, Hindi+Punjabi) by splitting
+ * into same-script segments and romanizing each non-Latin one independently.
+ * Returns null if the text has no non-Latin content (nothing to do).
+ */
+export function romanize(text: string): string | null {
+  if (!text || text.trim().length === 0) return null;
+
+  // Fast path: purely Latin text needs no romanization
+  if (!hasNonLatinScript(text)) return null;
+
+  const allScripts = detectAllScripts(text);
+  const nonLatinScripts = new Set(
+    [...allScripts].filter((s) => s !== ScriptType.Latin),
+  );
+
+  console.log(
+    `[Scriptify] romanize: scripts=${[...allScripts].join(",")} for "${text.substring(0, 30)}..."`,
+  );
+
+  // If the entire line is a single non-Latin script with no Latin mixed in,
+  // send the whole line to that script's romanizer — it handles everything natively.
+  if (nonLatinScripts.size === 1 && !allScripts.has(ScriptType.Latin)) {
+    const [singleScript] = nonLatinScripts;
+    const r = romanizeSegment(text, singleScript);
+    if (!r) return null;
+    return r
+      .replace(/^[a-z]/, (c) => c.toUpperCase())
+      .replace(/([.!?]\s+)([a-z])/g, (_, punc, ch) => punc + ch.toUpperCase());
+  }
+
+  // Mixed-script line: segment the text into consecutive runs of the same
+  // script and romanize each non-Latin segment independently.
+  // This correctly handles:
+  //   • Latin + Devanagari (e.g. "let's start वे")
+  //   • Devanagari + Gurmukhi (e.g. "इतनी सी ये बात ਵੇ")
+  //   • Latin + Devanagari + Gurmukhi (e.g. "aaja, let's go ਵੇ")
+  //   • Any other combination
+  const parts: string[] = [];
+  let current = "";
+  let currentSegScript: ScriptType = ScriptType.Unknown;
+
+  for (const char of text) {
+    const code = char.codePointAt(0) || 0;
+    // Neutral chars (ASCII whitespace and punctuation) attach to current run
+    if (
+      code <= 0x7f &&
+      (code <= 0x40 ||
+        (code >= 0x5b && code <= 0x60) ||
+        (code >= 0x7b && code <= 0x7f))
+    ) {
+      current += char;
+      continue;
+    }
+    const charScript = detectScript(char);
+    if (charScript !== currentSegScript) {
+      if (current.length > 0) {
+        const isLatin =
+          currentSegScript === ScriptType.Latin ||
+          currentSegScript === ScriptType.Unknown;
+        parts.push(
+          isLatin ? current : `\x00${currentSegScript}\x01${current}\x00`,
+        );
+      }
+      current = "";
+      currentSegScript = charScript;
+    }
+    current += char;
+  }
+  if (current.length > 0) {
+    const isLatin =
+      currentSegScript === ScriptType.Latin ||
+      currentSegScript === ScriptType.Unknown;
+    parts.push(isLatin ? current : `\x00${currentSegScript}\x01${current}\x00`);
+  }
+
+  let anyRomanized = false;
+  let result = parts
+    .map((part) => {
+      if (part.startsWith("\x00") && part.endsWith("\x00")) {
+        const inner = part.slice(1, -1);
+        const sep = inner.indexOf("\x01");
+        const segScript = inner.slice(0, sep) as ScriptType;
+        const raw = inner.slice(sep + 1);
+        const romanized = romanizeSegment(raw, segScript);
+        if (romanized && romanized !== raw) {
+          anyRomanized = true;
+          return romanized;
+        }
+        return raw;
+      }
+      return part;
+    })
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!anyRomanized) return null;
+
+  // Sentence case: capitalize the first letter of the line and after
+  // sentence-ending punctuation (. ! ?) within the line.
+  result = result
+    .replace(/^[a-z]/, (c) => c.toUpperCase())
+    .replace(/([.!?]\s+)([a-z])/g, (_, punc, ch) => punc + ch.toUpperCase());
+  return result;
 }

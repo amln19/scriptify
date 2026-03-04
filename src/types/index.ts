@@ -3,7 +3,6 @@
 export enum LyricsMode {
   Original = "original",
   Romanized = "romanized",
-  Translated = "translated",
 }
 
 export interface LyricLine {

@@ -134,8 +134,52 @@ export function detectScript(text: string): ScriptType {
 }
 
 /**
- * Check if the text is already in Latin script (i.e., already romanized).
+ * Return all script types found in the text (with at least 1 character each).
+ * Useful for detecting mixed-script lines.
  */
-export function isLatinScript(text: string): boolean {
-  return detectScript(text) === ScriptType.Latin;
+export function detectAllScripts(text: string): Set<ScriptType> {
+  const found = new Set<ScriptType>();
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (code === undefined) continue;
+    // Detect Latin letters in the basic ASCII range (A-Z, a-z).
+    // These are below 0x80 so the UNICODE_RANGES loop below would skip them,
+    // but we must know whether Latin is present for the mixed-script check.
+    if ((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)) {
+      found.add(ScriptType.Latin);
+      continue;
+    }
+    if (code <= 0x7f) continue; // skip other ASCII (digits, punctuation, control)
+    for (const range of UNICODE_RANGES) {
+      if (code >= range.start && code <= range.end) {
+        found.add(range.script);
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * Check if the text contains ANY non-Latin script characters.
+ * Used to detect mixed-script lines (e.g., Hindi + English).
+ */
+export function hasNonLatinScript(text: string): boolean {
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (code === undefined) continue;
+    // Skip whitespace, punctuation, digits, basic ASCII symbols
+    if (code <= 0x7f) continue;
+    // Any character above basic ASCII that falls in a known non-Latin range
+    for (const range of UNICODE_RANGES) {
+      if (
+        range.script !== ScriptType.Latin &&
+        code >= range.start &&
+        code <= range.end
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }

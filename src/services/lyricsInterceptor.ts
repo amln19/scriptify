@@ -19,8 +19,8 @@
 
 import { LyricsMode, type LyricLine } from "../types";
 import { romanize, initRomanizer, setLanguageHint } from "./romanizer";
-import { translateLines } from "./translator";
 import { fetchLyrics, getCurrentTrackInfo } from "./lrclib";
+import { hasNonLatinScript } from "../utils/scriptDetector";
 
 // ─── Hard-coded CSS Class Names from css-map.json ─────────────────────────────
 
@@ -64,6 +64,10 @@ function classSelector(classes: string[]): string {
 let currentMode: LyricsMode = LyricsMode.Original;
 let currentTrackId: string | null = null;
 let modeChangeCallbacks: Array<(mode: LyricsMode) => void> = [];
+
+// Lyrics availability tracking
+let lyricsAvailable = true;
+let availabilityCallbacks: Array<(available: boolean) => void> = [];
 
 // Forward map: original text → replacement text
 let forwardMap = new Map<string, string>();
@@ -393,30 +397,6 @@ async function buildReplacementMaps(mode: LyricsMode): Promise<void> {
         "[Scriptify] No lines were romanized. Lyrics may already be in Latin script.",
       );
     }
-  } else if (mode === LyricsMode.Translated) {
-    const trackInfo = getCurrentTrackInfo();
-    const lines: LyricLine[] = originals.map((t) => ({
-      startTimeMs: 0,
-      text: t,
-    }));
-    console.log(`[Scriptify] Translating ${lines.length} lines...`);
-
-    const translated = await translateLines(lines, trackInfo?.id || "");
-    if (translated) {
-      let count = 0;
-      for (let i = 0; i < originals.length; i++) {
-        if (translated[i]?.text && translated[i].text !== originals[i]) {
-          forwardMap.set(originals[i], translated[i].text);
-          reverseMap.set(translated[i].text, originals[i]);
-          count++;
-        }
-      }
-      console.log(
-        `[Scriptify] Built translation map: ${count}/${originals.length} lines translated`,
-      );
-    } else {
-      console.warn("[Scriptify] Translation returned null");
-    }
   }
 }
 
@@ -617,6 +597,9 @@ export async function initLyricsInterceptor(): Promise<void> {
         detectedLanguage = null;
         console.log(`[Scriptify] Song change: ${info?.name || "unknown"}`);
 
+        // Check lyrics availability immediately
+        checkAndNotifyAvailability(newId);
+
         if (currentMode !== LyricsMode.Original) {
           // Give Spotify time to render new lyrics before rebuilding maps
           setTimeout(async () => {
@@ -654,14 +637,11 @@ export function getCurrentMode(): LyricsMode {
 }
 
 export async function cycleMode(): Promise<LyricsMode> {
-  const modes = [
-    LyricsMode.Original,
-    LyricsMode.Romanized,
-    LyricsMode.Translated,
-  ];
-  const currentIndex = modes.indexOf(currentMode);
-  const nextIndex = (currentIndex + 1) % modes.length;
-  return setMode(modes[nextIndex]);
+  const nextMode =
+    currentMode === LyricsMode.Original
+      ? LyricsMode.Romanized
+      : LyricsMode.Original;
+  return setMode(nextMode);
 }
 
 export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
@@ -672,7 +652,7 @@ export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
 
   // Step 2: Restore ALL visible lyrics to originals using the current reverseMap
   // This is critical when switching modes — the on-screen text may be a previous
-  // replacement (romanized/translated), and we need originals back before
+  // replacement (romanized), and we need originals back before
   // building new maps or leaving in Original mode.
   if (reverseMap.size > 0) {
     const elements = findLyricLineElements();
@@ -757,9 +737,98 @@ export function loadSavedMode(): LyricsMode {
   return LyricsMode.Original;
 }
 
+export function onLyricsAvailabilityChange(
+  callback: (available: boolean) => void,
+): () => void {
+  availabilityCallbacks.push(callback);
+  return () => {
+    availabilityCallbacks = availabilityCallbacks.filter(
+      (cb) => cb !== callback,
+    );
+  };
+}
+
+/**
+ * Check whether ALL lyrics lines are already in Latin/romanized script.
+ * If no line contains any non-Latin characters, Scriptify's romanization
+ * is unnecessary — the lyrics are already readable.
+ */
+function areLyricsAlreadyRomanized(lyrics: LyricLine[]): boolean {
+  // Every line must be purely Latin (no Devanagari, Gurmukhi, etc.)
+  for (const line of lyrics) {
+    const text = line.text.trim();
+    if (text.length === 0) continue; // skip empty lines
+    if (hasNonLatinScript(text)) return false; // found a non-Latin line
+  }
+  return true;
+}
+
+/**
+ * Check lyrics availability for a track and notify subscribers.
+ * "Available" for Scriptify means: lyrics exist AND they contain at least
+ * one non-Latin line (otherwise romanization would be pointless).
+ */
+async function checkAndNotifyAvailability(trackId: string): Promise<void> {
+  const lyrics = await fetchSpotifyLyrics(trackId);
+  let available = lyrics !== null && lyrics.length > 0;
+  // If lyrics exist but are already all-Latin, Scriptify has nothing to do
+  if (available && lyrics && areLyricsAlreadyRomanized(lyrics)) {
+    console.log(
+      "[Scriptify] Lyrics already in Latin script — disabling button",
+    );
+    available = false;
+  }
+  if (available !== lyricsAvailable) {
+    lyricsAvailable = available;
+    for (const cb of availabilityCallbacks) {
+      try {
+        cb(available);
+      } catch {}
+    }
+  }
+}
+
+/**
+ * Check lyrics availability for the current track.
+ * Called once at startup after the interceptor is initialized.
+ * Retries briefly if no track is detected yet (Spotify may still be loading).
+ */
+export async function checkInitialLyricsAvailability(): Promise<void> {
+  // If currentTrackId wasn't set during init, try again
+  if (!currentTrackId) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const info = getCurrentTrackInfo();
+      if (info?.id) {
+        currentTrackId = info.id;
+        break;
+      }
+    }
+  }
+  if (currentTrackId) {
+    // Force notification even on first check (lyricsAvailable default is true,
+    // but we need to notify if the track actually has no lyrics)
+    const lyrics = await fetchSpotifyLyrics(currentTrackId);
+    let available = lyrics !== null && lyrics.length > 0;
+    if (available && lyrics && areLyricsAlreadyRomanized(lyrics)) {
+      console.log(
+        "[Scriptify] Initial track lyrics already in Latin script — disabling button",
+      );
+      available = false;
+    }
+    lyricsAvailable = available;
+    for (const cb of availabilityCallbacks) {
+      try {
+        cb(available);
+      } catch {}
+    }
+  }
+}
+
 export function destroyLyricsInterceptor(): void {
   stopContinuousReplacement();
   forwardMap.clear();
   reverseMap.clear();
   modeChangeCallbacks = [];
+  availabilityCallbacks = [];
 }

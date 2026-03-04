@@ -1,7 +1,7 @@
 {
   "name": "scriptify",
   "version": "1.0.0",
-  "description": "Spicetify extension: Toggle lyrics between Original, Romanized, and Translated scripts",
+  "description": "Spicetify extension: Toggle lyrics between Original and Romanized scripts",
   "main": "dist/scriptify.js",
   "scripts": {
     "build": "node build.js",

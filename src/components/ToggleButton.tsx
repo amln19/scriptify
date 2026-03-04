@@ -1,41 +1,12 @@
 /**
  * Scriptify Settings Panel
  *
- * A modal settings panel for configuring translation language and
- * viewing the current mode. Triggered from the playbar button via right-click
- * or from Spicetify.PopupModal.
+ * A modal settings panel for viewing and switching the current lyrics mode.
+ * Triggered from the playbar button via right-click or from Spicetify.PopupModal.
  */
 
 import { LyricsMode } from "../types";
 import { getCurrentMode, setMode } from "../services/lyricsInterceptor";
-import {
-  getTargetLanguage,
-  setTargetLanguage,
-  clearTranslationCache,
-} from "../services/translator";
-
-const LANGUAGE_OPTIONS = [
-  { code: "en", name: "English" },
-  { code: "hi", name: "Hindi" },
-  { code: "ta", name: "Tamil" },
-  { code: "te", name: "Telugu" },
-  { code: "bn", name: "Bengali" },
-  { code: "mr", name: "Marathi" },
-  { code: "gu", name: "Gujarati" },
-  { code: "kn", name: "Kannada" },
-  { code: "ml", name: "Malayalam" },
-  { code: "pa", name: "Punjabi" },
-  { code: "es", name: "Spanish" },
-  { code: "fr", name: "French" },
-  { code: "de", name: "German" },
-  { code: "pt", name: "Portuguese" },
-  { code: "ja", name: "Japanese" },
-  { code: "ko", name: "Korean" },
-  { code: "zh", name: "Chinese" },
-  { code: "ar", name: "Arabic" },
-  { code: "ru", name: "Russian" },
-  { code: "it", name: "Italian" },
-];
 
 /**
  * Create a settings panel as a DOM element.
@@ -46,7 +17,6 @@ function createSettingsElement(): HTMLElement {
   container.style.cssText = "padding: 8px 0;";
 
   const currentMode = getCurrentMode();
-  const currentLang = getTargetLanguage();
 
   // Mode selector section
   const modeSection = document.createElement("div");
@@ -63,16 +33,13 @@ function createSettingsElement(): HTMLElement {
   const modes = [
     { mode: LyricsMode.Original, label: "Original" },
     { mode: LyricsMode.Romanized, label: "Romanized" },
-    { mode: LyricsMode.Translated, label: "Translated" },
   ];
 
   for (const { mode, label } of modes) {
     const btn = document.createElement("button");
     btn.className = "scriptify-mode-btn";
     if (mode === currentMode) {
-      btn.classList.add(
-        mode === LyricsMode.Translated ? "translated-active" : "active",
-      );
+      btn.classList.add("active");
     }
     btn.textContent = label;
     btn.addEventListener("click", async () => {
@@ -80,49 +47,15 @@ function createSettingsElement(): HTMLElement {
       Spicetify.showNotification(`Scriptify: ${label}`, false, 1500);
       // Update active state
       modeButtons.querySelectorAll(".scriptify-mode-btn").forEach((b) => {
-        b.classList.remove("active", "translated-active");
+        b.classList.remove("active");
       });
-      btn.classList.add(
-        mode === LyricsMode.Translated ? "translated-active" : "active",
-      );
+      btn.classList.add("active");
     });
     modeButtons.appendChild(btn);
   }
 
   modeSection.appendChild(modeButtons);
   container.appendChild(modeSection);
-
-  // Language selector section
-  const langSection = document.createElement("div");
-  langSection.className = "scriptify-settings-section";
-
-  const langLabel = document.createElement("p");
-  langLabel.className = "scriptify-settings-label";
-  langLabel.textContent = "Translation Language";
-  langSection.appendChild(langLabel);
-
-  const select = document.createElement("select");
-  select.className = "scriptify-settings-select";
-  select.value = currentLang;
-
-  for (const lang of LANGUAGE_OPTIONS) {
-    const option = document.createElement("option");
-    option.value = lang.code;
-    option.textContent = lang.name;
-    if (lang.code === currentLang) option.selected = true;
-    select.appendChild(option);
-  }
-
-  select.addEventListener("change", () => {
-    setTargetLanguage(select.value);
-    clearTranslationCache();
-    if (getCurrentMode() === LyricsMode.Translated) {
-      setMode(LyricsMode.Translated);
-    }
-  });
-
-  langSection.appendChild(select);
-  container.appendChild(langSection);
 
   // Info text
   const info = document.createElement("p");

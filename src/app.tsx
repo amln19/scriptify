@@ -1,8 +1,8 @@
 /**
  * Scriptify — Main Entry Point
  *
- * A Spicetify extension that adds a 3-way toggle to Spotify's lyrics view
- * for switching between Original, Romanized, and Translated lyrics.
+ * A Spicetify extension that adds a toggle to Spotify's lyrics view
+ * for switching between Original and Romanized lyrics.
  *
  * Architecture (v3):
  * 1. Wait for Spicetify APIs to be fully loaded
@@ -11,7 +11,7 @@
  * 4. Register a Spicetify.Playbar.Button in the bottom-right now-playing bar
  *    (next to the lyrics/queue/volume controls)
  * 5. Right-click opens settings panel
- * 6. Restore saved user preferences (mode + language)
+ * 6. Restore saved user preferences (mode)
  */
 
 import { LyricsMode } from "./types";
@@ -24,6 +24,8 @@ import {
   cycleMode,
   getCurrentMode,
   onModeChange,
+  onLyricsAvailabilityChange,
+  checkInitialLyricsAvailability,
   destroyLyricsInterceptor,
 } from "./services/lyricsInterceptor";
 
@@ -37,7 +39,6 @@ const SCRIPTIFY_ICON_SVG = `<svg viewBox="0 0 16 16" width="16" height="16" fill
 const MODE_LABELS: Record<LyricsMode, string> = {
   [LyricsMode.Original]: "Original",
   [LyricsMode.Romanized]: "Romanized",
-  [LyricsMode.Translated]: "Translated",
 };
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
@@ -84,6 +85,7 @@ function registerPlaybarButton(): void {
       label,
       SCRIPTIFY_ICON_SVG,
       async () => {
+        if (!lyricsAvailableForTrack) return;
         try {
           const newMode = await cycleMode();
           Spicetify.showNotification(
@@ -119,11 +121,34 @@ function registerPlaybarButton(): void {
 /**
  * Update the playbar button tooltip and active state for the current mode.
  */
+let lyricsAvailableForTrack = true;
+
 function updatePlaybarButton(mode: LyricsMode): void {
   if (!playbarButton) return;
   try {
     playbarButton.label = `Scriptify: ${MODE_LABELS[mode]}`;
     playbarButton.active = mode !== LyricsMode.Original;
+  } catch {}
+}
+
+function setPlaybarButtonDisabled(disabled: boolean): void {
+  if (!playbarButton) return;
+  lyricsAvailableForTrack = !disabled;
+  try {
+    if (disabled) {
+      // No lyrics: gray out and hide the active dot
+      playbarButton.active = false;
+      if (playbarButton.element) {
+        playbarButton.element.classList.add("scriptify-disabled");
+      }
+    } else {
+      // Lyrics available: restore correct active state and remove gray
+      const mode = getCurrentMode();
+      playbarButton.active = mode !== LyricsMode.Original;
+      if (playbarButton.element) {
+        playbarButton.element.classList.remove("scriptify-disabled");
+      }
+    }
   } catch {}
 }
 
@@ -152,6 +177,24 @@ function registerKeyboardShortcut(): void {
       showSettings();
     }
   });
+}
+
+// ─── Startup Lyrics Pane Close ────────────────────────────────────────────────
+//
+// If Spotify restarts with the lyrics pane already open, our MutationObserver
+// can interfere with React's DOM ownership and make the native lyrics toggle
+// unresponsive. Closing the pane once on startup avoids this issue — the user
+// can reopen it cleanly and everything works.
+
+function closeLyricsPaneOnStartup(): void {
+  const btn = document.querySelector(
+    'button[data-testid="lyrics-button"]',
+  ) as HTMLButtonElement | null;
+
+  if (btn?.getAttribute("aria-pressed") === "true") {
+    btn.click();
+    console.log("[Scriptify] Closed lyrics pane on startup");
+  }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -188,12 +231,23 @@ async function main(): Promise<void> {
       updatePlaybarButton(mode);
     });
 
+    // Listen for lyrics availability changes to gray out button
+    onLyricsAvailabilityChange((available) => {
+      setPlaybarButtonDisabled(!available);
+    });
+
+    // Check availability for the initial track
+    await checkInitialLyricsAvailability();
+
     console.log(
       "[Scriptify] Ready! Click the Scriptify button in the playbar to cycle lyrics modes.",
     );
     console.log(
       "[Scriptify] Keyboard: Ctrl+Shift+L to cycle, Ctrl+Shift+; for settings",
     );
+
+    // Close lyrics pane if it was left open from a previous session
+    closeLyricsPaneOnStartup();
   } catch (e) {
     console.error("[Scriptify] Initialization failed:", e);
   }

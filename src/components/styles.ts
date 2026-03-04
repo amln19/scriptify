@@ -17,6 +17,11 @@ export function injectStyles(): void {
       position: relative;
     }
 
+    .scriptify-playbar-btn.scriptify-disabled {
+      opacity: 0.3;
+      pointer-events: none;
+    }
+
     /* ─── Settings Panel ────────────────────────────────────────── */
     .scriptify-settings-overlay {
       position: fixed;
@@ -109,12 +114,6 @@ export function injectStyles(): void {
       background: rgba(29, 185, 84, 0.2);
       border-color: var(--text-bright-accent, #1db954);
       color: var(--text-bright-accent, #1db954);
-    }
-
-    .scriptify-mode-btn.translated-active {
-      background: rgba(30, 144, 255, 0.2);
-      border-color: #1e90ff;
-      color: #1e90ff;
     }
 
     .scriptify-settings-close {
