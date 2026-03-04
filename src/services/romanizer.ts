@@ -22,6 +22,9 @@
  *   8. Chinese                — CJK → pinyin
  *   9. Script Routing         — internal per-segment dispatcher
  *  10. Public API             — romanize() entry point + initRomanizer()
+ *
+ * TODO: Improve romanization quality for Marathi, Bengali, Kannada,
+ * Gujarati, Malayalam, and Odia.
  */
 
 import {
@@ -1270,6 +1273,83 @@ function iastToHinglish(text: string, convertVtoW = true): string {
   return result;
 }
 
+/**
+ * Normalize Sanscript Tamil output to readable colloquial Latin.
+ *
+ * Sanscript's Tamil scheme emits many aspirated clusters (gh/jh/bh/dh)
+ * that look unnatural for end-user lyrics readability. This pass simplifies
+ * those artifacts while preserving common Tamil-English spellings.
+ */
+function normalizeTamilRomanization(text: string): string {
+  let result = text;
+
+  // 1) Collapse over-aspirated geminate patterns first
+  //    e.g., irughgha → irukka, vaighghudhu → vaikkudhu
+  result = result.replace(/ghgh/gi, (m: string) =>
+    m[0] === "G" ? "Kk" : "kk",
+  );
+
+  // 2) Common aspirate simplifications for Tamil consonants
+  result = result
+    .replace(/bh/gi, (m: string) => (m[0] === "B" ? "P" : "p"))
+    .replace(/jhjh/gi, (m: string) => (m[0] === "J" ? "Ch" : "ch"))
+    .replace(/jh/gi, (m: string) => (m[0] === "J" ? "S" : "s"));
+
+  // 3) gh handling: keep natural "g" in most places, but initial "gh" → "k"
+  //    for common Tamil க word-start realizations (e.g., ghasam → kasam).
+  result = result
+    .replace(/\bgh/gi, (m: string) => (m[0] === "G" ? "K" : "k"))
+    .replace(/nggh/gi, (m: string) => (m[0] === "N" ? "Ng" : "ng"))
+    .replace(/gh/gi, (m: string) => (m[0] === "G" ? "G" : "g"));
+
+  // 4) Frequently occurring Tamil cluster cleanups
+  result = result
+    .replace(/dhdh/gi, (m: string) => (m[0] === "D" ? "Tt" : "tt"))
+    .replace(/ddh/gi, (m: string) => (m[0] === "D" ? "Tt" : "tt"))
+    .replace(/\bdhaa\b/gi, (m: string) => (m[0] === "D" ? "Daa" : "daa"))
+    .replace(/\boy/gi, (m: string) => (m[0] === "O" ? "Oi" : "oi"));
+
+  // Remove any remaining combining marks (e.g. l̤ → l)
+  result = result.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+
+  // 5) Targeted readability tweaks for high-frequency colloquial outcomes
+  result = result
+    .replace(/\bsinimaa\b/gi, (m: string) =>
+      m[0] === "S" ? "Cinema" : "cinema",
+    )
+    .replace(/\bkodhikka\b/gi, (m: string) =>
+      m[0] === "K" ? "Kothikka" : "kothikka",
+    )
+    .replace(/\bkodhikkudhu\b/gi, (m: string) =>
+      m[0] === "K" ? "Kothikkudhu" : "kothikkudhu",
+    )
+    .replace(/aig\b/gi, (m: string) => (m[0] === "A" ? "Aik" : "aik"))
+    .replace(/\blaihp\b/gi, (m: string) => (m[0] === "L" ? "Life" : "life"))
+    .replace(/\blaihbh\b/gi, (m: string) => (m[0] === "L" ? "Life" : "life"))
+    .replace(/\briyal\b/gi, (m: string) => (m[0] === "R" ? "Real" : "real"))
+    .replace(/\bsummaa\b/gi, (m: string) => (m[0] === "S" ? "Summa" : "summa"))
+    .replace(/\bkaarril\b/gi, (m: string) =>
+      m[0] === "K" ? "Kaatril" : "kaatril",
+    )
+    .replace(/\bodhidhuven\b/gi, (m: string) =>
+      m[0] === "O" ? "Odiduven" : "odiduven",
+    )
+    .replace(/\bodhinaalum\b/gi, (m: string) =>
+      m[0] === "O" ? "Odinaalum" : "odinaalum",
+    )
+    .replace(/\bkondhu\b/gi, (m: string) => (m[0] === "K" ? "Kondu" : "kondu"))
+    .replace(/\bpindhodharndhu\b/gi, (m: string) =>
+      m[0] === "P" ? "Pinthodarndhu" : "pinthodarndhu",
+    )
+    .replace(/\bdhraag\b/gi, (m: string) => (m[0] === "D" ? "Track" : "track"))
+    .replace(/\bsdhori\b/gi, (m: string) => (m[0] === "S" ? "Story" : "story"))
+    .replace(/\bneedhis\s+sattiyam\b/gi, (m: string) =>
+      m[0] === "N" ? "Needhi sathiyam" : "needhi sathiyam",
+    );
+
+  return result;
+}
+
 /** Maps ScriptType to @indic-transliteration/sanscript scheme names */
 const INDIC_SCHEME_MAP: Record<string, string> = {
   [ScriptType.Devanagari]: "devanagari",
@@ -1361,6 +1441,10 @@ function romanizeIndic(text: string, script: ScriptType): string | null {
     result = iastToHinglish(result, false);
 
     // ── Script-specific post-processing ──
+    if (script === ScriptType.Tamil) {
+      result = normalizeTamilRomanization(result);
+    }
+
     // Bengali & Odia: ব/ବ is pronounced "b" not "v" (unlike Hindi/Telugu/Tamil)
     if (script === ScriptType.Bengali || script === ScriptType.Odia) {
       result = result.replace(/v/gi, (m: string) => (m === "V" ? "B" : "b"));

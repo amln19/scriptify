@@ -1,23 +1,23 @@
 /**
- * Lyrics Interception & Processing Layer (v3)
+ * Lyrics Interception & Processing Layer (v4 — dual-line)
  *
  * Core orchestrator of Scriptify. Architecture:
  * 1. Uses HARD-CODED obfuscated class names from Spicetify's css-map.json
  *    to find lyrics elements in the DOM
  * 2. Falls back to structural heuristics (dir="auto" grouped by parent)
  * 3. Fetches lyrics via Spotify's internal API (CosmosAsync) for map building
- * 4. Uses FORWARD/REVERSE maps for text replacement:
- *    - forwardMap: original text → replacement text
- *    - reverseMap: replacement text → original text
- * 5. Runs a continuous interval (100ms) that re-applies replacements,
- *    combating React re-renders that overwrite our textContent changes
+ * 4. Uses a FORWARD map: original text → romanized text
+ * 5. INJECTS a styled sub-element (.scriptify-romanized) below each lyric line
+ *    instead of replacing the original text, giving a dual-line display
+ * 6. Runs a continuous interval (100ms) that re-injects sub-elements after
+ *    React re-renders wipe them
  *
  * Key insight: React constantly re-renders lyrics (for scroll/highlight).
- * Single textContent swaps get overwritten immediately. The interval
- * approach detects when React puts back the original and re-applies.
+ * Injected DOM nodes are wiped on each render. The interval + MutationObserver
+ * re-inject the romanized sub-elements before the user notices.
  */
 
-import { LyricsMode, type LyricLine } from "../types";
+import { LyricsMode, DisplayStyle, type LyricLine } from "../types";
 import { romanize, initRomanizer, setLanguageHint } from "./romanizer";
 import { fetchLyrics, getCurrentTrackInfo } from "./lrclib";
 import { hasNonLatinScript } from "../utils/scriptDetector";
@@ -69,10 +69,8 @@ let modeChangeCallbacks: Array<(mode: LyricsMode) => void> = [];
 let lyricsAvailable = true;
 let availabilityCallbacks: Array<(available: boolean) => void> = [];
 
-// Forward map: original text → replacement text
+// Forward map: original text → romanized text
 let forwardMap = new Map<string, string>();
-// Reverse map: replacement text → original text
-let reverseMap = new Map<string, string>();
 
 // Replacement interval (100 ms reliable fallback)
 let replaceInterval: ReturnType<typeof setInterval> | null = null;
@@ -90,6 +88,13 @@ let isWriting = false;
 // Counter for consecutive interval ticks that find zero lyrics elements.
 // After 30 ticks (3 s) the engine auto-stops to avoid wasted work.
 let emptyTicks = 0;
+
+// Display style: dual-line (annotation below) or replace-only (swap text visually)
+let displayStyle: DisplayStyle = DisplayStyle.DualLine;
+
+// Romanized font size multiplier (1.0 = default 0.72em base)
+let romanizedFontSizeMultiplier = 1.0;
+const FONT_SIZE_BASE_EM = 0.72;
 
 // ─── Spotify Lyrics API ───────────────────────────────────────────────────────
 
@@ -298,12 +303,116 @@ function readText(el: Element): string {
 }
 
 /**
- * Write replacement text to a lyric element.
+ * Inject a romanized sub-element below the lyric line.
+ * If one already exists with the same text, skip. If React wiped it, re-inject.
+ * The sub-element fades in via CSS transition.
+ * In replace-only mode, also hides the original text visually.
  */
-function writeText(el: Element, text: string): void {
-  const textEl = getTextElement(el);
-  if (textEl.textContent !== text) {
-    textEl.textContent = text;
+function injectRomanized(lineEl: Element, romanizedText: string): void {
+  // Check if we already injected for this line
+  const existing = lineEl.querySelector(".scriptify-romanized");
+  if (existing) {
+    // Already present with correct text
+    if (existing.textContent === romanizedText) {
+      // Ensure replace-line class is in sync with current display style
+      if (displayStyle === DisplayStyle.ReplaceOnly) {
+        lineEl.classList.add("scriptify-replace-line");
+      } else {
+        lineEl.classList.remove("scriptify-replace-line");
+      }
+      return;
+    }
+    // Text changed (different line scrolled into this element) — update
+    existing.textContent = romanizedText;
+    return;
+  }
+
+  // Apply replace-line class if in replace-only mode
+  if (displayStyle === DisplayStyle.ReplaceOnly) {
+    lineEl.classList.add("scriptify-replace-line");
+  }
+
+  // Create and inject
+  const sub = document.createElement("div");
+  sub.className = "scriptify-romanized";
+  sub.textContent = romanizedText;
+  lineEl.appendChild(sub);
+
+  // Trigger fade-in: add .scriptify-visible on next frame
+  requestAnimationFrame(() => {
+    sub.classList.add("scriptify-visible");
+  });
+}
+
+/**
+ * Remove all injected romanized sub-elements from the DOM.
+ * Also removes replace-line classes that hide original text.
+ */
+function removeAllRomanized(): void {
+  const elements = document.querySelectorAll(".scriptify-romanized");
+  for (const el of elements) {
+    el.remove();
+  }
+  const replaceLines = document.querySelectorAll(".scriptify-replace-line");
+  for (const el of replaceLines) {
+    el.classList.remove("scriptify-replace-line");
+  }
+}
+
+/**
+ * Find the lyric line element currently most visible on screen.
+ * First checks for Spotify's own active-line marker, then falls back
+ * to the line whose center is closest to the viewport center.
+ * Call this BEFORE any DOM height changes so the reference is accurate.
+ */
+function findCurrentLyricElement(): Element | null {
+  const elements = findLyricLineElements();
+  if (elements.length === 0) return null;
+
+  // Spotify marks the active line with aria-current="true" or a data attribute
+  for (const el of elements) {
+    if (
+      el.getAttribute("aria-current") === "true" ||
+      el.getAttribute("data-active") === "true"
+    ) {
+      return el;
+    }
+  }
+
+  // Fallback: find the line whose center is closest to mid-viewport
+  const viewportMid = window.innerHeight / 2;
+  let closest: Element | null = null;
+  let closestDist = Infinity;
+  for (const el of elements) {
+    const rect = el.getBoundingClientRect();
+    if (rect.height === 0) continue; // not rendered
+    const dist = Math.abs(rect.top + rect.height / 2 - viewportMid);
+    if (dist < closestDist) {
+      closestDist = dist;
+      closest = el;
+    }
+  }
+  return closest;
+}
+
+/**
+ * After a height change (sub-elements added/removed), scroll `el` back to
+ * the vertical center of the lyrics panel. Uses requestAnimationFrame so
+ * the browser has recalculated layout before we scroll.
+ */
+function restoreScrollToElement(el: Element, delayMs = 0): void {
+  const doScroll = (): void => {
+    if (!el.isConnected) return;
+    el.scrollIntoView({
+      behavior: "instant" as ScrollBehavior,
+      block: "center",
+    });
+  };
+
+  if (delayMs > 0) {
+    setTimeout(() => requestAnimationFrame(doScroll), delayMs);
+  } else {
+    requestAnimationFrame(doScroll);
   }
 }
 
@@ -336,7 +445,7 @@ async function collectOriginals(): Promise<string[]> {
   const elements = findLyricLineElements();
   for (const el of elements) {
     const text = readText(el);
-    if (text && !seen.has(text) && !reverseMap.has(text)) {
+    if (text && !seen.has(text)) {
       seen.add(text);
       originals.push(text);
     }
@@ -367,7 +476,6 @@ async function collectOriginals(): Promise<string[]> {
  */
 async function buildReplacementMaps(mode: LyricsMode): Promise<void> {
   forwardMap.clear();
-  reverseMap.clear();
 
   if (mode === LyricsMode.Original) return;
 
@@ -385,7 +493,6 @@ async function buildReplacementMaps(mode: LyricsMode): Promise<void> {
       const romanized = romanize(text);
       if (romanized && romanized !== text) {
         forwardMap.set(text, romanized);
-        reverseMap.set(romanized, text);
         count++;
       }
     }
@@ -428,7 +535,7 @@ function applyReplacementsCached(): void {
     if (!el.isConnected) continue;
     const text = readText(el);
     if (text && forwardMap.has(text)) {
-      writeText(el, forwardMap.get(text)!);
+      injectRomanized(el, forwardMap.get(text)!);
     }
   }
   Promise.resolve().then(() => {
@@ -437,7 +544,7 @@ function applyReplacementsCached(): void {
 }
 
 /**
- * FULL replacement — refreshes element cache and re-attaches observer.
+ * FULL injection — refreshes element cache and re-attaches observer.
  * Called by the 100 ms interval as the reliable fallback.
  *
  * Auto-stops after 3 s of finding zero lyrics elements (user closed
@@ -453,7 +560,7 @@ function applyReplacements(): void {
     emptyTicks++;
     if (emptyTicks >= 30) {
       stopContinuousReplacement();
-      console.log("[Scriptify] Auto-stopped replacement (no lyrics visible)");
+      console.log("[Scriptify] Auto-stopped injection (no lyrics visible)");
     }
     return;
   }
@@ -463,12 +570,12 @@ function applyReplacements(): void {
   // Ensure the narrow observer is attached
   ensureLyricsObserver();
 
-  // Apply replacements
+  // Inject romanized sub-elements
   isWriting = true;
   for (const el of cachedLyricElements) {
     const text = readText(el);
     if (text && forwardMap.has(text)) {
-      writeText(el, forwardMap.get(text)!);
+      injectRomanized(el, forwardMap.get(text)!);
     }
   }
   Promise.resolve().then(() => {
@@ -647,29 +754,19 @@ export async function cycleMode(): Promise<LyricsMode> {
 export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
   console.log(`[Scriptify] Setting mode: ${mode}`);
 
+  // Capture the currently visible line BEFORE any DOM height changes.
+  // We'll scroll back to it after the toggle to preserve reading position.
+  const anchorEl = findCurrentLyricElement();
+
   // Step 1: Stop any existing replacement interval
   stopContinuousReplacement();
 
-  // Step 2: Restore ALL visible lyrics to originals using the current reverseMap
-  // This is critical when switching modes — the on-screen text may be a previous
-  // replacement (romanized), and we need originals back before
-  // building new maps or leaving in Original mode.
-  if (reverseMap.size > 0) {
-    const elements = findLyricLineElements();
-    let restored = 0;
-    for (const el of elements) {
-      const text = readText(el);
-      if (text && reverseMap.has(text)) {
-        writeText(el, reverseMap.get(text)!);
-        restored++;
-      }
-    }
-    console.log(`[Scriptify] Restored ${restored} lyrics to originals`);
-  }
+  // Step 2: Remove all injected romanized sub-elements
+  removeAllRomanized();
+  console.log("[Scriptify] Removed romanized sub-elements");
 
   // Step 3: Clear old maps
   forwardMap.clear();
-  reverseMap.clear();
 
   // Step 4: Update state
   currentMode = mode;
@@ -679,6 +776,8 @@ export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
 
   if (mode === LyricsMode.Original) {
     console.log("[Scriptify] Mode set to Original");
+    // Height decreased (sub-elements removed) — restore scroll immediately
+    if (anchorEl) restoreScrollToElement(anchorEl);
   } else {
     // Step 5: Build new maps and start continuous replacement.
     // On startup, lyrics may not be available yet — retry a few times.
@@ -690,6 +789,9 @@ export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
       await buildReplacementMaps(mode);
       if (forwardMap.size > 0) {
         startContinuousReplacement();
+        // Height increased (sub-elements injected) — wait for first injection
+        // pass (~100ms interval) then restore scroll position
+        if (anchorEl) restoreScrollToElement(anchorEl, 200);
         break;
       }
       if (retries < MAX_RETRIES) {
@@ -735,6 +837,112 @@ export function loadSavedMode(): LyricsMode {
     }
   } catch {}
   return LyricsMode.Original;
+}
+
+// ─── Display Style ────────────────────────────────────────────────────────────
+
+export function getDisplayStyle(): DisplayStyle {
+  return displayStyle;
+}
+
+export function loadSavedDisplayStyle(): DisplayStyle {
+  try {
+    const saved = Spicetify.LocalStorage.get(
+      "scriptify:displayStyle",
+    ) as DisplayStyle;
+    if (saved && Object.values(DisplayStyle).includes(saved)) {
+      displayStyle = saved;
+      return saved;
+    }
+  } catch {}
+  return DisplayStyle.DualLine;
+}
+
+export async function setDisplayStyle(style: DisplayStyle): Promise<void> {
+  displayStyle = style;
+  try {
+    Spicetify.LocalStorage.set("scriptify:displayStyle", style);
+  } catch {}
+
+  // If currently showing romanized lyrics, refresh the display
+  if (currentMode === LyricsMode.Romanized && forwardMap.size > 0) {
+    removeAllRomanized();
+    // Re-inject with new style
+    applyReplacements();
+  }
+}
+
+// ─── Font Size ────────────────────────────────────────────────────────────────
+
+export function getRomanizedFontSizeMultiplier(): number {
+  return romanizedFontSizeMultiplier;
+}
+
+export function loadSavedFontSize(): number {
+  try {
+    const saved = Spicetify.LocalStorage.get("scriptify:fontSizeMultiplier");
+    if (saved) {
+      const val = parseFloat(saved);
+      if (!isNaN(val) && val >= 0.5 && val <= 1.5) {
+        romanizedFontSizeMultiplier = val;
+        applyFontSizeVariable();
+        return val;
+      }
+    }
+  } catch {}
+  return 1.0;
+}
+
+export function setRomanizedFontSize(multiplier: number): void {
+  romanizedFontSizeMultiplier = Math.max(0.5, Math.min(1.5, multiplier));
+  try {
+    Spicetify.LocalStorage.set(
+      "scriptify:fontSizeMultiplier",
+      romanizedFontSizeMultiplier.toString(),
+    );
+  } catch {}
+  applyFontSizeVariable();
+
+  // Re-sync scroll to the current line so the user doesn't lose their place
+  // after the height change caused by the font size adjustment
+  setTimeout(() => scrollToCurrentLine(), 50);
+}
+
+function applyFontSizeVariable(): void {
+  const emSize = romanizedFontSizeMultiplier * FONT_SIZE_BASE_EM;
+  document.documentElement.style.setProperty(
+    "--scriptify-font-size",
+    `${emSize}em`,
+  );
+}
+
+// ─── Jump to Current Line ─────────────────────────────────────────────────────
+
+export function scrollToCurrentLine(): boolean {
+  const elements = findLyricLineElements();
+  if (elements.length === 0) return false;
+
+  // Look for Spotify's active line marker
+  for (const el of elements) {
+    if (
+      el.getAttribute("aria-current") === "true" ||
+      el.getAttribute("data-active") === "true"
+    ) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      return true;
+    }
+  }
+
+  // Fall back to the active class pattern
+  for (const el of elements) {
+    const classes = el.className || "";
+    if (classes.includes("Active") || classes.includes("active")) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      return true;
+    }
+  }
+
+  return false;
 }
 
 export function onLyricsAvailabilityChange(
@@ -827,8 +1035,8 @@ export async function checkInitialLyricsAvailability(): Promise<void> {
 
 export function destroyLyricsInterceptor(): void {
   stopContinuousReplacement();
+  removeAllRomanized();
   forwardMap.clear();
-  reverseMap.clear();
   modeChangeCallbacks = [];
   availabilityCallbacks = [];
 }

@@ -20,12 +20,15 @@ import { showSettings } from "./components/ToggleButton";
 import {
   initLyricsInterceptor,
   loadSavedMode,
+  loadSavedDisplayStyle,
+  loadSavedFontSize,
   setMode,
   cycleMode,
   getCurrentMode,
   onModeChange,
   onLyricsAvailabilityChange,
   checkInitialLyricsAvailability,
+  scrollToCurrentLine,
   destroyLyricsInterceptor,
 } from "./services/lyricsInterceptor";
 
@@ -88,11 +91,6 @@ function registerPlaybarButton(): void {
         if (!lyricsAvailableForTrack) return;
         try {
           const newMode = await cycleMode();
-          Spicetify.showNotification(
-            `Scriptify: ${MODE_LABELS[newMode]}`,
-            false,
-            1500,
-          );
           updatePlaybarButton(newMode);
         } catch (e) {
           console.warn("[Scriptify] Mode cycle failed:", e);
@@ -161,11 +159,6 @@ function registerKeyboardShortcut(): void {
       e.preventDefault();
       try {
         const newMode = await cycleMode();
-        Spicetify.showNotification(
-          `Scriptify: ${MODE_LABELS[newMode]}`,
-          false,
-          1500,
-        );
         updatePlaybarButton(newMode);
       } catch (err) {
         console.warn("[Scriptify] Keyboard shortcut failed:", err);
@@ -175,6 +168,11 @@ function registerKeyboardShortcut(): void {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === ";") {
       e.preventDefault();
       showSettings();
+    }
+    // Ctrl/Cmd + Shift + J to jump to current line
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === "J") {
+      e.preventDefault();
+      scrollToCurrentLine();
     }
   });
 }
@@ -211,6 +209,8 @@ async function main(): Promise<void> {
 
     // Load saved preferences
     const savedMode = loadSavedMode();
+    loadSavedDisplayStyle();
+    loadSavedFontSize();
 
     // Initialize lyrics processing pipeline
     await initLyricsInterceptor();
@@ -243,7 +243,7 @@ async function main(): Promise<void> {
       "[Scriptify] Ready! Click the Scriptify button in the playbar to cycle lyrics modes.",
     );
     console.log(
-      "[Scriptify] Keyboard: Ctrl+Shift+L to cycle, Ctrl+Shift+; for settings",
+      "[Scriptify] Keyboard: Ctrl+Shift+L to cycle, Ctrl+Shift+; for settings, Ctrl+Shift+J to jump",
     );
 
     // Close lyrics pane if it was left open from a previous session

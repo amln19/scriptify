@@ -5,6 +5,11 @@ export enum LyricsMode {
   Romanized = "romanized",
 }
 
+export enum DisplayStyle {
+  DualLine = "dual-line",
+  ReplaceOnly = "replace-only",
+}
+
 export interface LyricLine {
   /** Start time in milliseconds */
   startTimeMs: number;

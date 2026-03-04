@@ -143,6 +143,86 @@ export function injectStyles(): void {
       font-family: var(--font-family, 'CircularSp', 'Helvetica Neue', Helvetica, Arial, sans-serif);
     }
 
+    /* ─── Dual-line Romanized Sub-element ───────────────────────── */
+    .scriptify-romanized {
+      font-size: var(--scriptify-font-size, 0.72em);
+      opacity: 0;
+      margin-top: 2px;
+      letter-spacing: 0.01em;
+      line-height: 1.3;
+      /* Inherit parent color so Spotify's active/inactive transitions
+         automatically apply to the romanized line too */
+      color: currentColor;
+      font-family: var(--font-family, 'CircularSp', 'Helvetica Neue', Helvetica, Arial, sans-serif);
+      pointer-events: none;
+      transition: opacity 0.3s ease, transform 0.3s ease;
+      transform: translateY(-4px);
+    }
+
+    .scriptify-romanized.scriptify-visible {
+      opacity: 0.65;
+      transform: translateY(0);
+    }
+
+    /* ─── Replace-only Mode ─────────────────────────────────────── */
+    /* Hides original text and promotes romanized to primary display */
+    .scriptify-replace-line > *:not(.scriptify-romanized) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+      padding: 0;
+      margin: -1px;
+    }
+
+    .scriptify-replace-line > .scriptify-romanized {
+      font-size: inherit;
+      opacity: 1;
+      margin-top: 0;
+      transform: none;
+      pointer-events: auto;
+      transition: none;
+    }
+
+    /* ─── Keyboard Shortcuts Guide ──────────────────────────────── */
+    .scriptify-shortcuts {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .scriptify-shortcut-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .scriptify-shortcut-desc {
+      font-size: 12px;
+      color: var(--text-subdued, #a7a7a7);
+      font-family: var(--font-family, 'CircularSp', 'Helvetica Neue', Helvetica, Arial, sans-serif);
+    }
+
+    .scriptify-shortcut-keys {
+      display: flex;
+      gap: 3px;
+    }
+
+    .scriptify-kbd {
+      display: inline-block;
+      padding: 2px 6px;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-base, #ffffff);
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+      font-family: var(--font-family, 'CircularSp', 'Helvetica Neue', Helvetica, Arial, sans-serif);
+    }
+
     /* ─── Animations ────────────────────────────────────────────── */
     @keyframes scriptify-fade-in {
       from { opacity: 0; }
