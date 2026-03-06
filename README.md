@@ -1,17 +1,17 @@
 # Scriptify
 
-A Spicetify extension that adds a lyrics toggle to Spotify — switch between **Original** and **Romanized** lyrics with a single click. Spotify only shows lyrics in their original script, which isn't helpful if you can't read Devanagari, Hangul, or Kanji. Scriptify fixes that.
+A Spicetify extension that adds a custom lyrics toggle to Spotify -> enables switching between **Original** and **Romanized** lyrics with a single click. The problem: Spotify only shows lyrics in their original script, at least for the desktop app, which isn't helpful if you can't read Devanagari, Hangul, or Kanji. Scriptify fixes that.
 
 ## Features
 
-- 🔄 **Lyrics toggle** — switch between Original and Romanized (Latin transliteration) modes
-- 🌍 **12+ writing systems** — Devanagari, Tamil, Bengali, Telugu, Kannada, Gujarati, Malayalam, Gurmukhi, Odia, Japanese (Hiragana/Katakana), Korean (Hangul), Chinese (CJK)
-- 🇮🇳 **Purpose-built Hindi romanizer** — direct Devanagari → Hinglish parser with schwa deletion, nuqta handling, and a 500+ word lookup dictionary for natural results (bypasses IAST entirely)
-- 🎯 **Playbar integration** — button sits in the bottom-right now-playing bar, right next to the native lyrics/queue/volume controls
-- ⌨️ **Keyboard shortcuts** — `Ctrl+Shift+L` to toggle modes, `Ctrl+Shift+;` for settings
-- 💾 **Persistent preferences** — mode choice is saved across sessions
-- ⚡ **Zero flash** — a narrow MutationObserver + 100ms interval engine re-applies replacements before React re-renders can flash the original script
-- 🔇 **Graceful degradation** — if romanization fails, the extension silently falls back to original lyrics with no visible errors
+- **Lyrics toggle** — switch between Original and Romanized (Latin transliteration) modes
+- **12+ writing systems** — Devanagari, Gurmukhi, Bengali, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam, Japanese (Hiragana/Katakana), Korean (Hangul), Chinese (CJK)
+- **Purpose-built Hindi romanizer** — direct Devanagari → Hinglish parser with schwa deletion, nuqta handling, and a 500+ word lookup dictionary for natural results (bypasses IAST entirely)
+- **Playbar integration** — button sits in the bottom-right now-playing bar, right next to the native lyrics/queue/volume controls
+- **Simple keyboard shortcuts** — `Ctrl+Shift+L` to toggle modes, `Ctrl+Shift+;` for settings
+- **Persistent preferences** — mode choice is saved across sessions
+- **~Zero flash** — a narrow MutationObserver + 100ms interval engine re-applies replacements before React re-renders can flash the original script
+- **Graceful degradation** — if romanization fails, the extension silently falls back to original lyrics with no visible errors
 
 ## Tech Stack
 
@@ -100,7 +100,7 @@ No environment variables or API keys are required. All external APIs used (LRCLI
 - **Left-click** the Scriptify button in the playbar to toggle: Original ↔ Romanized
 - **Right-click** the button to open the settings panel
 - The button glows green when Romanized mode is active
-- A Spotify-style notification confirms each mode switch
+- On songs without lyrics, the button is grayed out like the lyrics button
 
 ## Architecture
 
@@ -108,14 +108,14 @@ No environment variables or API keys are required. All external APIs used (LRCLI
 src/
 ├── app.tsx                     # Entry point — waits for Spicetify, registers Playbar.Button
 ├── components/
-│   ├── ToggleButton.tsx        # Settings panel (mode selector)
+│   ├── ToggleButton.ts         # Settings panel (mode selector)
 │   └── styles.ts               # Runtime CSS injection
 ├── services/
 │   ├── lyricsInterceptor.ts    # Core orchestrator — DOM detection, replacement maps, MutationObserver engine
 │   ├── romanizer.ts            # Multi-script romanization (direct Hindi parser + Sanscript IAST + CJK/Japanese/Korean)
 │   └── lrclib.ts               # LRCLIB lyrics API client (fallback lyrics source)
 ├── utils/
-│   └── scriptDetector.ts       # Unicode range analysis for writing system detection
+│   └── scriptDetector.ts       # Unicode range analysis for writing system (script) detection
 ├── types/
 │   ├── index.ts                # Core types (LyricsMode, LyricLine, TrackInfo, LRCLibResponse)
 │   └── spicetify.d.ts          # Spicetify global type declarations
@@ -136,8 +136,8 @@ src/
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | Devanagari (Hindi)                                         | Direct syllable parser with schwa deletion, nuqta handling, and 500+ word dictionary |
 | Devanagari (Marathi, Sanskrit, Nepali)                     | Sanscript → IAST → diacritic stripping → Hinglish conventions                        |
-| Tamil, Bengali, Telugu, Kannada, Gujarati, Malayalam, Odia | Sanscript → IAST → diacritic stripping                                               |
 | Gurmukhi (Punjabi)                                         | Direct syllable parser with schwa deletion and addak (gemination) support            |
+| Tamil, Bengali, Telugu, Kannada, Gujarati, Malayalam, Odia | Sanscript → IAST → diacritic stripping                                               |
 | Japanese (Hiragana/Katakana)                               | Built-in romaji lookup tables with compound kana and sokuon support                  |
 | Korean (Hangul)                                            | Hangul syllable decomposition → revised romanization                                 |
 | Chinese (CJK)                                              | Built-in pinyin map (500+ common characters)                                         |
