@@ -1,5 +1,5 @@
 /**
- * Lyrics Interception & Processing Layer (v4 — dual-line)
+ * Lyrics Interception & Processing Layer
  *
  * Core orchestrator of Scriptify. Architecture:
  * 1. Uses HARD-CODED obfuscated class names from Spicetify's css-map.json
@@ -51,13 +51,20 @@ const LYRICS_CLASSES = {
     "BXlQFspJp_jq9SKhUSP3",
     "MmIREVIj8A2aFVvBZ2Ev",
   ],
-  nowPlayingLyrics: ["hzUuLPdH48AzgQun5NYQ"],
-  cinemaContainer: ["y7xcnM6yyOOrMwI77d5t"],
 };
 
 function classSelector(classes: string[]): string {
   return classes.map((c) => `.${c}`).join(", ");
 }
+
+// Pre-computed selectors — LYRICS_CLASSES is a static constant, so these
+// strings never change. Computing them once avoids repeated .map().join()
+// calls in hot paths (observer callback, 100ms interval).
+const SEL_LYRIC_LINE = classSelector(LYRICS_CLASSES.lyricLine);
+const SEL_LYRIC_TEXT = classSelector(LYRICS_CLASSES.lyricText);
+const SEL_CONTENT_CONTAINER = classSelector(LYRICS_CLASSES.contentContainer);
+const SEL_CONTENT_WRAPPER = classSelector(LYRICS_CLASSES.contentWrapper);
+const SEL_CONTAINER = classSelector(LYRICS_CLASSES.container);
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -84,6 +91,11 @@ let cachedLyricElements: Element[] = [];
 
 // Guard flag — prevents observer from re-firing on our own DOM writes
 let isWriting = false;
+
+// Cache for getTextElement() — avoids re-walking the DOM subtree of each
+// lyric line on every observer fire. Keyed on the line element; WeakMap
+// entries are automatically released when elements are garbage-collected.
+const textElementCache = new WeakMap<Element, Element>();
 
 // Counter for consecutive interval ticks that find zero lyrics elements.
 // After 30 ticks (3 s) the engine auto-stops to avoid wasted work.
@@ -206,9 +218,8 @@ function findBestDirAutoGroup(root: Element): Element[] | null {
  */
 function findLyricLineElements(): Element[] {
   // Strategy 1: Hard-coded lyric line classes
-  const lineSel = classSelector(LYRICS_CLASSES.lyricLine);
   try {
-    const elements = document.querySelectorAll(lineSel);
+    const elements = document.querySelectorAll(SEL_LYRIC_LINE);
     if (elements.length > 0) {
       return Array.from(elements);
     }
@@ -267,13 +278,24 @@ function findLyricLineElements(): Element[] {
 /**
  * Get the text-bearing element within a lyric line.
  * Walks DOWN to find the deepest single-child path to the actual text.
+ * Results are cached per element — the inner DOM structure of a lyric line
+ * is stable between React re-renders; the cache is invalidated when the
+ * returned element is disconnected (React replaced the inner subtree).
  */
 function getTextElement(lineEl: Element): Element {
+  // Return cached result if the text element is still in the DOM
+  const cached = textElementCache.get(lineEl);
+  if (cached?.isConnected) return cached;
+
+  let result: Element;
+
   // Try css-map text class selectors
-  const textSel = classSelector(LYRICS_CLASSES.lyricText);
   try {
-    const textEl = lineEl.querySelector(textSel);
-    if (textEl && textEl.textContent?.trim()) return textEl;
+    const textEl = lineEl.querySelector(SEL_LYRIC_TEXT);
+    if (textEl && textEl.textContent?.trim()) {
+      textElementCache.set(lineEl, textEl);
+      return textEl;
+    }
   } catch {}
 
   // Walk down the single-child path to find the deepest text element
@@ -284,15 +306,21 @@ function getTextElement(lineEl: Element): Element {
 
   // If we're at a leaf with text, use it
   if (target.children.length === 0 && target.textContent?.trim()) {
+    textElementCache.set(lineEl, target);
     return target;
   }
 
   // Try finding a span with text
   const span = lineEl.querySelector("span");
-  if (span && span.textContent?.trim()) return span;
+  if (span && span.textContent?.trim()) {
+    textElementCache.set(lineEl, span);
+    return span;
+  }
 
   // Fall back to the deepest element we found, or the line itself
-  return target.textContent?.trim() ? target : lineEl;
+  result = target.textContent?.trim() ? target : lineEl;
+  textElementCache.set(lineEl, result);
+  return result;
 }
 
 /**
@@ -534,8 +562,9 @@ function applyReplacementsCached(): void {
   for (const el of cachedLyricElements) {
     if (!el.isConnected) continue;
     const text = readText(el);
-    if (text && forwardMap.has(text)) {
-      injectRomanized(el, forwardMap.get(text)!);
+    const romanized = text && forwardMap.get(text);
+    if (romanized) {
+      injectRomanized(el, romanized);
     }
   }
   Promise.resolve().then(() => {
@@ -574,8 +603,9 @@ function applyReplacements(): void {
   isWriting = true;
   for (const el of cachedLyricElements) {
     const text = readText(el);
-    if (text && forwardMap.has(text)) {
-      injectRomanized(el, forwardMap.get(text)!);
+    const romanized = text && forwardMap.get(text);
+    if (romanized) {
+      injectRomanized(el, romanized);
     }
   }
   Promise.resolve().then(() => {
@@ -589,12 +619,11 @@ function applyReplacements(): void {
  * observing those broad targets causes UI interference (Issue 1).
  */
 function findNarrowLyricsContainer(): Element | null {
-  for (const classes of [
-    LYRICS_CLASSES.contentContainer,
-    LYRICS_CLASSES.contentWrapper,
-    LYRICS_CLASSES.container,
+  for (const sel of [
+    SEL_CONTENT_CONTAINER,
+    SEL_CONTENT_WRAPPER,
+    SEL_CONTAINER,
   ]) {
-    const sel = classSelector(classes);
     try {
       const el = document.querySelector(sel);
       if (el) return el;
@@ -763,7 +792,6 @@ export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
 
   // Step 2: Remove all injected romanized sub-elements
   removeAllRomanized();
-  console.log("[Scriptify] Removed romanized sub-elements");
 
   // Step 3: Clear old maps
   forwardMap.clear();
@@ -775,7 +803,6 @@ export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
   } catch {}
 
   if (mode === LyricsMode.Original) {
-    console.log("[Scriptify] Mode set to Original");
     // Height decreased (sub-elements removed) — restore scroll immediately
     if (anchorEl) restoreScrollToElement(anchorEl);
   } else {

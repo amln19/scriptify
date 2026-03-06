@@ -54,7 +54,7 @@ export function injectStyles(): void {
     }
 
     .scriptify-settings-section {
-      margin-bottom: 16px;
+      margin-bottom: 10px;
     }
 
     .scriptify-settings-label {

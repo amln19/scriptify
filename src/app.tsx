@@ -4,7 +4,7 @@
  * A Spicetify extension that adds a toggle to Spotify's lyrics view
  * for switching between Original and Romanized lyrics.
  *
- * Architecture (v3):
+ * Architecture:
  * 1. Wait for Spicetify APIs to be fully loaded
  * 2. Inject CSS styles
  * 3. Initialize the lyrics interceptor (Spotify API + DOM processing)
