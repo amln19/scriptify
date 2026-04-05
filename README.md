@@ -1,11 +1,11 @@
 # Scriptify
 
-A Spicetify extension that adds a custom lyrics toggle to Spotify -> enables switching between **Original** and **Romanized** lyrics with a single click. The problem: Spotify only shows lyrics in their original script, at least for the desktop app, which isn't helpful if you can't read Devanagari, Hangul, or Kanji. Scriptify fixes that.
+A Spicetify extension that adds a custom lyrics toggle to Spotify, enabling switching between **Original** and **Romanized** lyrics with a single click. The problem: Spotify only shows lyrics in their original script, at least for the desktop app, which isn't helpful if you can't read Devanagari, Hangul, or Kanji. Scriptify fixes that.
 
 ## Features
 
 - **Lyrics toggle** — switch between Original and Romanized (Latin transliteration) modes
-- **12+ writing systems** — Devanagari, Gurmukhi, Bengali, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam, Japanese (Hiragana/Katakana), Korean (Hangul), Chinese (CJK)
+- **12+ writing systems** — Devanagari, Gurmukhi, Bengali, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam, Japanese (Hiragana/Katakana), Korean (Hangul), Chinese (Hanzi)
 - **Purpose-built Hindi romanizer** — direct Devanagari → Hinglish parser with schwa deletion, nuqta handling, and a 500+ word lookup dictionary for natural results (bypasses IAST entirely)
 - **Playbar integration** — button sits in the bottom-right now-playing bar, right next to the native lyrics/queue/volume controls
 - **Simple keyboard shortcuts** — `Ctrl+Shift+L` to toggle modes, `Ctrl+Shift+;` for settings
@@ -140,7 +140,7 @@ src/
 | Tamil, Bengali, Telugu, Kannada, Gujarati, Malayalam, Odia | Sanscript → IAST → diacritic stripping                                               |
 | Japanese (Hiragana/Katakana)                               | Built-in romaji lookup tables with compound kana and sokuon support                  |
 | Korean (Hangul)                                            | Hangul syllable decomposition → revised romanization                                 |
-| Chinese (CJK)                                              | Built-in pinyin map (500+ common characters)                                         |
+| Chinese (Hanzi)                                            | Built-in pinyin map (500+ common characters)                                         |
 
 ## License
 
