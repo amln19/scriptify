@@ -1,0 +1,21 @@
+[
+  {
+    "name": "Scriptify",
+    "description": "Toggle Spotify lyrics between their original script and romanized text.",
+    "preview": "assets/preview.png",
+    "main": "dist/scriptify.js",
+    "readme": "README.md",
+    "authors": [
+      {
+        "name": "amln19",
+        "url": "https://github.com/amln19"
+      }
+    ],
+    "tags": [
+      "lyrics",
+      "romanization",
+      "transliteration",
+      "accessibility"
+    ]
+  }
+]
