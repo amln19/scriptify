@@ -148,6 +148,7 @@ export function injectStyles(): void {
 
     /* ─── Replace-only Mode ─────────────────────────────────────── */
     /* Hides original text and promotes romanized to primary display */
+    .scriptify-replace-line > .scriptify-original,
     .scriptify-replace-line > *:not(.scriptify-romanized) {
       position: absolute;
       width: 1px;

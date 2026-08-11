@@ -8,7 +8,7 @@
  *   Punjabi (Gurmukhi)    ─ Custom syllable parser + Addak gemination + schwa deletion
  *   Other Indic           ─ @indic-transliteration/sanscript → IAST → diacritic strip
  *   Japanese              ─ Hiragana / Katakana lookup tables
- *   Korean (Hangul)       ─ Syllable decomposition → revised romanization
+ *   Korean (Hangul)       ─ Syllable decomposition + common liaison rules
  *   Chinese (CJK)         ─ Built-in pinyin map for common CJK characters
  *   Mixed-script lines    ─ Per-segment routing (e.g. Hindi+English, Hindi+Punjabi)
  *
@@ -24,7 +24,7 @@
  *      5d. Bengali Dictionary   — pre-computed Bengali exceptions
  *      5e. Gurmukhi Direct      — Punjabi direct parser (bypasses Sanscript)
  *    6. Japanese                — hiragana / katakana → romaji
- *    7. Korean                  — Hangul → revised romanization
+ *    7. Korean                  — Hangul → pronunciation-aware romanization
  *    8. Chinese                 — CJK → pinyin
  *    9. Script Routing          — internal per-segment dispatcher
  *   10. Public API              — romanize() entry point + initRomanizer()
@@ -51,30 +51,21 @@ let currentLanguageHint: string | null = null;
  * Called by lyricsInterceptor before romanization begins.
  */
 export function setLanguageHint(lang: string | null): void {
-  currentLanguageHint = lang;
-  console.log(`[Scriptify] Language hint set: ${lang}`);
+  currentLanguageHint = lang
+    ?.trim()
+    .toLowerCase()
+    .split(/[-_]/, 1)[0] || null;
+  console.log(`[Scriptify] Language hint set: ${currentLanguageHint}`);
 }
 
 /**
- * Languages that use Devanagari but should NOT get Hindi-style schwa deletion.
- * Marathi has different (partial) schwa deletion rules.
- * Sanskrit has NO schwa deletion.
- * Nepali has partial schwa deletion similar to Hindi but with some differences.
- */
-const SCHWA_DELETION_LANGUAGES = new Set(["hi"]);
-const NO_SCHWA_DELETION_LANGUAGES = new Set(["mr", "sa", "ne"]);
-
-/**
- * Should we apply Hindi-style colloquial post-processing for this Devanagari text?
- * - If language is "hi" → yes
- * - If language is "mr"/"sa"/"ne" → no
- * - If language is unknown → yes (Hindi is ~95%+ of Devanagari on Spotify)
+ * Hindi-specific spelling rules are useful only when the source identifies the
+ * language as Hindi. LRCLIB and DOM-only fallbacks carry no language metadata;
+ * treating every unknown Devanagari line as Hindi corrupts Marathi, Sanskrit,
+ * and Nepali lyrics. Those lines use the neutral Sanscript path instead.
  */
 function shouldApplyHindiPostProcessing(): boolean {
-  if (!currentLanguageHint) return true; // Default to Hindi for unknown
-  if (SCHWA_DELETION_LANGUAGES.has(currentLanguageHint)) return true;
-  if (NO_SCHWA_DELETION_LANGUAGES.has(currentLanguageHint)) return false;
-  return true; // Other unknown languages with Devanagari, default to Hindi
+  return currentLanguageHint === "hi";
 }
 
 // ─── 2. Hindi: Dictionaries ─────────────────────────────────────────────────
@@ -2985,8 +2976,66 @@ const KOREAN_FINALS = [
   "t",
 ];
 
+interface KoreanSyllable {
+  initial: number;
+  medial: number;
+  final: number;
+  initialOverride?: string;
+}
+
+type KoreanToken = KoreanSyllable | string;
+
+function isKoreanSyllable(token: KoreanToken): token is KoreanSyllable {
+  return typeof token !== "string";
+}
+
+/**
+ * Return the onset sound when a final consonant is followed by a vowel-initial
+ * syllable. This covers the common liaison cases while leaving complex final
+ * clusters conservative rather than inventing an incorrect reading.
+ */
+function getKoreanLiaisonInitial(final: number, medial: number): string | null {
+  switch (final) {
+    case 1: // ㄱ
+      return "g";
+    case 2: // ㄲ
+      return "kk";
+    case 4: // ㄴ
+      return "n";
+    case 7: // ㄷ
+      return medial === 20 ? "j" : "d";
+    case 8: // ㄹ
+      return "r";
+    case 16: // ㅁ
+      return "m";
+    case 17: // ㅂ
+      return "b";
+    case 19: // ㅅ
+      return "s";
+    case 20: // ㅆ
+      return "ss";
+    case 21: // ㅇ
+      return "ng";
+    case 22: // ㅈ
+      return "j";
+    case 23: // ㅊ
+      return "ch";
+    case 24: // ㅋ
+      return "k";
+    case 25: // ㅌ
+      return medial === 20 ? "ch" : "t";
+    case 26: // ㅍ
+      return "p";
+    case 27: // ㅎ is silent before a vowel in common forms (좋아 → joa)
+      return "";
+    default:
+      return null;
+  }
+}
+
 function romanizeKorean(text: string): string {
-  let result = "";
+  const tokens: KoreanToken[] = [];
+
   // Canonically decomposed Hangul Jamo composes into the same syllables as NFC
   // input. Without this, equivalent NFD lyrics were detected as Korean but
   // passed through untouched.
@@ -2994,19 +3043,46 @@ function romanizeKorean(text: string): string {
     const code = char.codePointAt(0)!;
     if (code >= 0xac00 && code <= 0xd7a3) {
       const offset = code - 0xac00;
-      const initial = Math.floor(offset / (21 * 28));
-      const medial = Math.floor((offset % (21 * 28)) / 28);
-      const final = offset % 28;
-
-      result +=
-        KOREAN_INITIALS[initial] +
-        KOREAN_MEDIALS[medial] +
-        KOREAN_FINALS[final];
+      tokens.push({
+        initial: Math.floor(offset / (21 * 28)),
+        medial: Math.floor((offset % (21 * 28)) / 28),
+        final: offset % 28,
+      });
     } else {
-      result += char;
+      tokens.push(char);
     }
   }
-  return result;
+
+  // A final consonant before a vowel-initial syllable is realized as that next
+  // syllable's onset. Handle this before rendering so 한국어, 같이, and 먹어요
+  // become Hangugeo, Gachi, and Meogeoyo.
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const current = tokens[i];
+    const next = tokens[i + 1];
+    if (
+      !isKoreanSyllable(current) ||
+      !isKoreanSyllable(next) ||
+      current.final === 0 ||
+      next.initial !== 11 // silent ㅇ
+    ) {
+      continue;
+    }
+    const liaison = getKoreanLiaisonInitial(current.final, next.medial);
+    if (liaison === null) continue;
+    current.final = 0;
+    next.initialOverride = liaison;
+  }
+
+  return tokens
+    .map((token) => {
+      if (!isKoreanSyllable(token)) return token;
+      return (
+        (token.initialOverride ?? KOREAN_INITIALS[token.initial]) +
+        KOREAN_MEDIALS[token.medial] +
+        KOREAN_FINALS[token.final]
+      );
+    })
+    .join("");
 }
 
 // ─── 8. Chinese ──────────────────────────────────────────────────────────────

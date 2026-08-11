@@ -30,7 +30,7 @@ import {
   hasRomanizableScript,
 } from "./romanizer";
 import { fetchLyrics, getCurrentTrackInfo } from "./lrclib";
-import { withTimeout } from "../utils/async";
+import { TimeoutError, withTimeout } from "../utils/async";
 
 // ─── Hard-coded CSS Class Names from css-map.json ─────────────────────────────
 
@@ -135,6 +135,11 @@ let displayStyle: DisplayStyle = DisplayStyle.DualLine;
 // Romanized font size multiplier (1.0 = default 0.72em base)
 let romanizedFontSizeMultiplier = 1.0;
 const FONT_SIZE_BASE_EM = 0.72;
+
+// A mode change should not hold the playbar/UI hostage while both remote lyric
+// sources are unavailable. DOM-only retries continue after the initial network
+// collection, but the initial collection itself has a fixed upper bound.
+const INITIAL_MAP_BUILD_TIMEOUT_MS = 12_000;
 
 function isStateCurrent(
   generation: number,
@@ -407,6 +412,24 @@ function readText(el: Element): string {
  * In replace-only mode, also hides the original text visually.
  */
 function injectRomanized(lineEl: Element, romanizedText: string): void {
+  // A structural fallback can identify a leaf element whose source lyric is a
+  // direct text node. Wrap that source before appending our sibling: otherwise
+  // future text reads include the injected romanization, and Replace mode has
+  // no element it can hide.
+  const textEl = getTextElement(lineEl);
+  if (textEl === lineEl) {
+    const textNodes = Array.from(lineEl.childNodes).filter(
+      (node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim(),
+    );
+    if (textNodes.length > 0) {
+      const original = document.createElement("span");
+      original.className = "scriptify-original";
+      lineEl.insertBefore(original, textNodes[0]);
+      for (const node of textNodes) original.appendChild(node);
+      textElementCache.set(lineEl, original);
+    }
+  }
+
   // Keep the replace-line class in sync with the current display style on every
   // path — including the "text changed" one below, which used to return early
   // and leave a recycled line stuck in the previous style.
@@ -436,6 +459,24 @@ function injectRomanized(lineEl: Element, romanizedText: string): void {
   requestAnimationFrame(() => {
     sub.classList.add("scriptify-visible");
   });
+}
+
+/** Remove this line's injected annotation and any replace-only state. */
+function removeRomanizedFromLine(lineEl: Element): void {
+  lineEl.querySelector(".scriptify-romanized")?.remove();
+  lineEl.classList.remove("scriptify-replace-line");
+}
+
+/** Keep one rendered lyric line consistent with the current replacement map. */
+function syncRomanizedLine(lineEl: Element, romanized: string | undefined): void {
+  if (romanized) {
+    injectRomanized(lineEl, romanized);
+  } else {
+    // React virtualizes/reuses lyric elements. A line that changed from a
+    // mapped script to Latin or an unsupported/missing line must not retain
+    // the previous line's romanization.
+    removeRomanizedFromLine(lineEl);
+  }
 }
 
 /**
@@ -523,13 +564,14 @@ interface CollectedOriginals {
 
 async function collectOriginals(
   trackInfo: TrackInfo | null,
+  includeNetworkSources = true,
 ): Promise<CollectedOriginals> {
   const originals: string[] = [];
   const seen = new Set<string>();
   let language: string | null = null;
 
   // Source 1: Spotify internal API (has ALL lyrics, not just visible)
-  if (trackInfo) {
+  if (trackInfo && includeNetworkSources) {
     const spotifyResult = await fetchSpotifyLyrics(trackInfo.id);
     if (spotifyResult) {
       language = spotifyResult.language;
@@ -554,7 +596,7 @@ async function collectOriginals(
   }
 
   // Source 3: LRCLIB fallback
-  if (originals.length === 0 && trackInfo) {
+  if (originals.length === 0 && trackInfo && includeNetworkSources) {
     const lrclibLyrics = await fetchLyrics(trackInfo);
     if (lrclibLyrics) {
       for (const line of lrclibLyrics) {
@@ -591,12 +633,16 @@ async function buildReplacementMaps(
   generation: number,
   expectedTrackId: string | null,
   trackInfo: TrackInfo | null,
+  includeNetworkSources = true,
 ): Promise<BuildReplacementResult> {
   if (mode === LyricsMode.Original) {
     return { originalCount: 0, replacementCount: 0, applied: false };
   }
 
-  const { originals, language } = await collectOriginals(trackInfo);
+  const { originals, language } = await collectOriginals(
+    trackInfo,
+    includeNetworkSources,
+  );
   if (!isStateCurrent(generation, expectedTrackId, mode)) {
     return {
       originalCount: originals.length,
@@ -676,10 +722,7 @@ function applyReplacementsCached(): void {
   for (const el of cachedLyricElements) {
     if (!el.isConnected) continue;
     const text = readText(el);
-    const romanized = text && forwardMap.get(text);
-    if (romanized) {
-      injectRomanized(el, romanized);
-    }
+    syncRomanizedLine(el, text && forwardMap.get(text));
   }
   Promise.resolve().then(() => {
     isWriting = false;
@@ -723,10 +766,7 @@ function applyReplacements(): void {
   isWriting = true;
   for (const el of cachedLyricElements) {
     const text = readText(el);
-    const romanized = text && forwardMap.get(text);
-    if (romanized) {
-      injectRomanized(el, romanized);
-    }
+    syncRomanizedLine(el, text && forwardMap.get(text));
   }
   Promise.resolve().then(() => {
     isWriting = false;
@@ -957,7 +997,7 @@ export async function cycleMode(): Promise<LyricsMode> {
 
 export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
   console.log(`[Scriptify] Setting mode: ${mode}`);
-  const generation = ++stateGeneration;
+  let generation = ++stateGeneration;
   const expectedTrackId = currentTrackId;
   const trackInfo = getCurrentTrackInfo();
   cancelPendingSongChangeTimeouts();
@@ -992,12 +1032,42 @@ export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
     const RETRY_DELAY = 2000;
 
     while (retries <= MAX_RETRIES) {
-      const result = await buildReplacementMaps(
-        mode,
-        generation,
-        expectedTrackId,
-        trackInfo,
-      );
+      let result: BuildReplacementResult;
+      try {
+        // Remote sources are consulted once. Later retries are deliberately
+        // DOM-only: they wait for Spotify to render rather than multiplying
+        // network timeouts and rate-limit pressure.
+        const build = buildReplacementMaps(
+          mode,
+          generation,
+          expectedTrackId,
+          trackInfo,
+          retries === 0,
+        );
+        result =
+          retries === 0
+            ? await withTimeout(
+                build,
+                INITIAL_MAP_BUILD_TIMEOUT_MS,
+                "Initial lyrics collection",
+              )
+            : await build;
+      } catch (error) {
+        if (!isStateCurrent(generation, expectedTrackId, mode)) {
+          return currentMode;
+        }
+        if (error instanceof TimeoutError) {
+          // The timed-out builder may still settle later. Advance the
+          // generation so it cannot commit a stale map or restart the engine.
+          generation = ++stateGeneration;
+          forwardMap.clear();
+          console.warn(
+            "[Scriptify] Initial lyrics collection timed out — leaving lyrics unchanged",
+          );
+          break;
+        }
+        throw error;
+      }
       if (!result.applied || !isStateCurrent(generation, expectedTrackId, mode)) {
         return currentMode;
       }

@@ -147,12 +147,12 @@ src/
 
 | Script                                                     | Method                                                                               |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Devanagari (Hindi)                                         | Direct syllable parser with schwa deletion, nuqta handling, and 500+ word dictionary |
-| Devanagari (Marathi, Sanskrit, Nepali)                     | Sanscript → IAST → diacritic stripping → Hinglish conventions                        |
+| Devanagari (Hindi, language identified)                    | Direct syllable parser with schwa deletion, nuqta handling, and 500+ word dictionary |
+| Devanagari (Marathi, Sanskrit, Nepali, or unknown fallback) | Sanscript → IAST → diacritic stripping → Hinglish conventions                        |
 | Gurmukhi (Punjabi)                                         | Direct syllable parser with schwa deletion and addak (gemination) support            |
 | Tamil, Bengali, Telugu, Kannada, Gujarati, Malayalam, Odia | Sanscript → IAST → diacritic stripping                                               |
 | Japanese (Hiragana/Katakana)                               | Built-in romaji lookup tables with compound kana and sokuon support                  |
-| Korean (Hangul)                                            | Hangul syllable decomposition → revised romanization                                 |
+| Korean (Hangul)                                            | Hangul syllable decomposition with common liaison and palatalization rules           |
 | Chinese (CJK)                                              | Built-in pinyin map (250 common characters; others pass through unchanged)           |
 
 Ideographs inside a Japanese or Korean line are treated as kanji/hanja rather than

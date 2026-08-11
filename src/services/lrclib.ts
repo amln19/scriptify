@@ -19,8 +19,14 @@ const LYRICS_CACHE = new Map<string, LyricLine[] | null>();
 const MAX_CACHE_SIZE = 30;
 const REQUEST_TIMEOUT_MS = 8_000;
 const FALLBACK_REQUEST_DELAY_MS = 250;
+const MAX_SEARCH_DURATION_DIFFERENCE_SECONDS = 2;
 const LRCLIB_CLIENT =
   "Scriptify v1.0 (https://github.com/amln19/scriptify)";
+
+// Rate limits apply to the whole client, not a single track request. Keep the
+// cooldown as state and fail quickly while it is active instead of parking a
+// mode toggle on an arbitrary server-provided delay.
+let rateLimitedUntilMs = 0;
 
 class RateLimitError extends Error {
   constructor(readonly retryAfterMs: number) {
@@ -64,15 +70,23 @@ async function requestJson(url: string): Promise<unknown | null> {
   return response.json();
 }
 
-async function requestJsonWithRateLimitRetry(
+async function requestJsonRespectingRateLimit(
   url: string,
 ): Promise<unknown | null> {
+  if (Date.now() < rateLimitedUntilMs) {
+    throw new RateLimitError(rateLimitedUntilMs - Date.now());
+  }
+
   try {
     return await requestJson(url);
   } catch (error) {
-    if (!(error instanceof RateLimitError)) throw error;
-    await new Promise((resolve) => setTimeout(resolve, error.retryAfterMs));
-    return requestJson(url);
+    if (error instanceof RateLimitError) {
+      rateLimitedUntilMs = Math.max(
+        rateLimitedUntilMs,
+        Date.now() + error.retryAfterMs,
+      );
+    }
+    throw error;
   }
 }
 
@@ -139,7 +153,7 @@ async function fetchExact(track: TrackInfo): Promise<LRCLibResponse | null> {
     params.set("album_name", track.album);
   }
 
-  const result = await requestJsonWithRateLimitRetry(
+  const result = await requestJsonRespectingRateLimit(
     `${LRCLIB_BASE}/get?${params}`,
   );
   if (result === null) return null;
@@ -154,10 +168,13 @@ async function fetchExact(track: TrackInfo): Promise<LRCLibResponse | null> {
  * Fetch lyrics from LRCLIB by search (more relaxed matching).
  */
 async function fetchSearch(track: TrackInfo): Promise<LRCLibResponse | null> {
-  const query = `${track.name} ${track.artist}`;
-  const params = new URLSearchParams({ q: query });
+  const params = new URLSearchParams({
+    track_name: track.name,
+    artist_name: track.artist,
+  });
+  if (track.album) params.set("album_name", track.album);
 
-  const result = await requestJsonWithRateLimitRetry(
+  const result = await requestJsonRespectingRateLimit(
     `${LRCLIB_BASE}/search?${params}`,
   );
   if (result === null) return null;
@@ -165,13 +182,17 @@ async function fetchSearch(track: TrackInfo): Promise<LRCLibResponse | null> {
     throw new Error("Unexpected LRCLIB search response");
   }
 
-  const results = result as LRCLibResponse[];
-  if (results.length === 0) return null;
+  if (result.length === 0) return null;
 
-  // Find best match by duration proximity
+  // Search is intentionally looser than /get, but accepting a same-duration
+  // keyword hit from another release can suppress future retries with a map
+  // that never matches Spotify's rendered lyrics. Require an identity match
+  // and LRCLIB's documented duration tolerance before ranking candidates.
   const targetDuration = track.duration / 1000;
-  const sorted = results
-    .filter((r) => r.syncedLyrics) // Only want synced lyrics
+  const sorted = result
+    .filter((candidate): candidate is LRCLibResponse =>
+      isMatchingSearchResult(candidate, track, targetDuration),
+    )
     .sort(
       (a, b) =>
         Math.abs(a.duration - targetDuration) -
@@ -179,6 +200,51 @@ async function fetchSearch(track: TrackInfo): Promise<LRCLibResponse | null> {
     );
 
   return sorted[0] || null;
+}
+
+function normalizeMatchText(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function isMatchingSearchResult(
+  candidate: unknown,
+  track: TrackInfo,
+  targetDuration: number,
+): candidate is LRCLibResponse {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    return false;
+  }
+  const result = candidate as Partial<LRCLibResponse>;
+  if (
+    typeof result.trackName !== "string" ||
+    typeof result.artistName !== "string" ||
+    typeof result.albumName !== "string" ||
+    typeof result.duration !== "number" ||
+    typeof result.syncedLyrics !== "string"
+  ) {
+    return false;
+  }
+  if (
+    normalizeMatchText(result.trackName) !== normalizeMatchText(track.name) ||
+    normalizeMatchText(result.artistName) !== normalizeMatchText(track.artist)
+  ) {
+    return false;
+  }
+  if (
+    track.album &&
+    normalizeMatchText(result.albumName) !== normalizeMatchText(track.album)
+  ) {
+    return false;
+  }
+  return (
+    Math.abs(result.duration - targetDuration) <=
+    MAX_SEARCH_DURATION_DIFFERENCE_SECONDS
+  );
 }
 
 /**

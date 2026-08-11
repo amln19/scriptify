@@ -223,11 +223,6 @@ async function main(): Promise<void> {
     // Initialize lyrics processing pipeline
     await initLyricsInterceptor();
 
-    // Restore saved mode
-    if (savedMode && savedMode !== LyricsMode.Original) {
-      await setMode(savedMode);
-    }
-
     // Register the Playbar button (bottom-right, next to lyrics button)
     registerPlaybarButton();
 
@@ -244,8 +239,18 @@ async function main(): Promise<void> {
       setPlaybarButtonDisabled(!available);
     });
 
-    // Check availability for the initial track
-    await checkInitialLyricsAvailability();
+    // Restore a saved mode in the background. A lyrics service outage must not
+    // prevent the playbar controls from appearing at startup.
+    void (async () => {
+      try {
+        if (savedMode && savedMode !== LyricsMode.Original) {
+          await setMode(savedMode);
+        }
+        await checkInitialLyricsAvailability();
+      } catch (e) {
+        console.warn("[Scriptify] Background initialization failed:", e);
+      }
+    })();
 
     console.log(
       "[Scriptify] Ready! Click the Scriptify button in the playbar to cycle lyrics modes.",

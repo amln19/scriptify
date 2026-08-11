@@ -189,6 +189,13 @@ test("canonically decomposed Korean Jamo matches precomposed Hangul", () => {
   assert.equal(romanize("한글"), romanize("한글"));
 });
 
+test("Korean romanization handles common liaison and palatalization", () => {
+  const { romanize } = freshModule("romanizer");
+  assert.equal(romanize("한국어"), "Hangugeo");
+  assert.equal(romanize("같이"), "Gachi");
+  assert.equal(romanize("먹어요"), "Meogeoyo");
+});
+
 test("unmapped CJK does not advertise unavailable romanization", () => {
   const { hasRomanizableScript, romanize } = freshModule("romanizer");
   assert.equal(romanize("龘"), "龘");
@@ -242,6 +249,16 @@ test("romanizer preserves Latin text, routes mixed scripts, and rejects unsuppor
   assert.equal(romanize("สวัสดี"), null);
   assert.equal(hasRomanizableScript("१२३"), true);
   assert.equal(hasRomanizableScript("Привет"), false);
+});
+
+test("unknown Devanagari uses neutral transliteration instead of Hindi-only rules", () => {
+  const { romanize, setLanguageHint } = freshModule("romanizer");
+  setLanguageHint("hi-IN");
+  assert.equal(romanize("कर्म"), "Karm");
+  setLanguageHint(null);
+  assert.equal(romanize("कर्म"), "Karma");
+  setLanguageHint("mr-IN");
+  assert.equal(romanize("विचारलं"), "Vichaarla");
 });
 
 test("script detection identifies dominant, mixed, and shared CJK scripts", () => {
@@ -397,16 +414,11 @@ test("availability falls back to LRCLIB when Spotify fails", async () => {
   interceptor.destroyLyricsInterceptor();
 });
 
-test("LRCLIB honors Retry-After once and parses repeated timestamps", async () => {
-  const originalSetTimeout = global.setTimeout;
+test("LRCLIB records Retry-After as a non-blocking cooldown and later recovers", async () => {
+  const originalNow = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
   const calls = [];
-  global.setTimeout = (callback, delay) => {
-    if (delay === 2_000) {
-      queueMicrotask(callback);
-      return 1;
-    }
-    return originalSetTimeout(callback, delay);
-  };
   global.fetch = async (url, options) => {
     calls.push({ url, options });
     if (calls.length === 1) {
@@ -420,14 +432,22 @@ test("LRCLIB honors Retry-After once and parses repeated timestamps", async () =
 
   try {
     const { fetchLyrics } = freshModule("lrclib");
-    const lines = await fetchLyrics({
+    const requestedTrack = {
       id: "rate-limit",
       uri: "spotify:track:rate-limit",
       name: "Track",
       artist: "Artist",
       album: "Album",
       duration: 180_000,
-    });
+    };
+    assert.equal(await fetchLyrics(requestedTrack), null);
+    assert.equal(calls.length, 1);
+    // A second caller observes the server's cooldown without another request.
+    assert.equal(await fetchLyrics(requestedTrack), null);
+    assert.equal(calls.length, 1);
+
+    now += 2_000;
+    const lines = await fetchLyrics(requestedTrack);
     assert.equal(calls.length, 2);
     assert.equal(calls[0].options.headers["Lrclib-Client"].startsWith("Scriptify v1.0"), true);
     assert.deepEqual(lines, [
@@ -435,7 +455,7 @@ test("LRCLIB honors Retry-After once and parses repeated timestamps", async () =
       { startTimeMs: 2_345, text: "chorus" },
     ]);
   } finally {
-    global.setTimeout = originalSetTimeout;
+    Date.now = originalNow;
   }
 });
 
@@ -466,7 +486,7 @@ test("LRCLIB transport failures are not negative-cached", async () => {
   assert.equal(calls, 2);
 });
 
-test("LRCLIB searches after an exact miss, selects the nearest synced result, and caches it", async () => {
+test("LRCLIB search uses structured identity and rejects wrong same-duration hits", async () => {
   const originalSetTimeout = global.setTimeout;
   const requests = [];
   global.setTimeout = (callback, delay) => {
@@ -480,9 +500,27 @@ test("LRCLIB searches after an exact miss, selects the nearest synced result, an
     requests.push(url);
     if (url.includes("/get?")) return jsonResponse(404, {});
     return jsonResponse(200, [
-      { duration: 181, syncedLyrics: "[00:03]nearest" },
-      { duration: 500, syncedLyrics: "[00:04]far" },
-      { duration: 180, syncedLyrics: null },
+      {
+        trackName: "Different Song",
+        artistName: "The Artist",
+        albumName: "Album Name",
+        duration: 180,
+        syncedLyrics: "[00:02]wrong",
+      },
+      {
+        trackName: "Song & Name",
+        artistName: "The Artist",
+        albumName: "Album Name",
+        duration: 181,
+        syncedLyrics: "[00:03]nearest",
+      },
+      {
+        trackName: "Song & Name",
+        artistName: "The Artist",
+        albumName: "Album Name",
+        duration: 190,
+        syncedLyrics: "[00:04]too-far",
+      },
     ]);
   };
 
@@ -499,12 +537,213 @@ test("LRCLIB searches after an exact miss, selects the nearest synced result, an
     assert.equal(requests.length, 2);
     assert.match(requests[0], /track_name=Song/);
     assert.match(requests[0], /album_name=Album/);
-    assert.match(requests[1], /\/search\?/);
+    assert.match(requests[1], /\/search\?track_name=Song/);
+    assert.match(requests[1], /artist_name=The/);
+    assert.match(requests[1], /album_name=Album/);
+    assert.doesNotMatch(requests[1], /(?:\?|&)q=/);
     assert.deepEqual(first, [{ startTimeMs: 3_000, text: "nearest" }]);
     assert.deepEqual(second, first);
   } finally {
     global.setTimeout = originalSetTimeout;
   }
+});
+
+test("mode retries wait for DOM without repeating failed network requests", async () => {
+  let spotifyCalls = 0;
+  let lrclibCalls = 0;
+  const environment = installInterceptorEnvironment("network-once", async () => {
+    spotifyCalls++;
+    throw new Error("Spotify unavailable");
+  });
+  global.fetch = async () => {
+    lrclibCalls++;
+    throw new Error("LRCLIB unavailable");
+  };
+  const originalSetTimeout = global.setTimeout;
+  global.setTimeout = (callback, delay, ...args) => {
+    if (delay === 2_000) {
+      queueMicrotask(() => callback(...args));
+      return 1;
+    }
+    return originalSetTimeout(callback, delay, ...args);
+  };
+
+  try {
+    const interceptor = freshModule("lyricsInterceptor");
+    await interceptor.initLyricsInterceptor();
+    await interceptor.setMode("romanized");
+    assert.equal(spotifyCalls, 1);
+    assert.equal(lrclibCalls, 1);
+    assert.equal(environment.intervals.size, 0);
+    interceptor.destroyLyricsInterceptor();
+  } finally {
+    global.setTimeout = originalSetTimeout;
+  }
+});
+
+test("initial map collection has a deadline and invalidates its late result", async () => {
+  const request = deferred();
+  const environment = installInterceptorEnvironment("deadline", () => request.promise);
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  const timers = [];
+  global.setTimeout = (callback, delay, ...args) => {
+    const timer = { callback: () => callback(...args), delay, cancelled: false };
+    timers.push(timer);
+    return timer;
+  };
+  global.clearTimeout = (timer) => {
+    if (timer) timer.cancelled = true;
+  };
+
+  try {
+    const interceptor = freshModule("lyricsInterceptor");
+    await interceptor.initLyricsInterceptor();
+    const pendingMode = interceptor.setMode("romanized");
+    await Promise.resolve();
+
+    const deadline = timers.find((timer) => timer.delay === 12_000);
+    assert.ok(deadline);
+    deadline.callback();
+    await pendingMode;
+    assert.equal(interceptor.getCurrentMode(), "romanized");
+    assert.equal(environment.intervals.size, 0);
+
+    // Completing the old request after the deadline must not commit a map or
+    // restart the injection loop.
+    request.resolve(lyricsResponse(["नमस्ते"], "hi"));
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(environment.intervals.size, 0);
+    interceptor.destroyLyricsInterceptor();
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+  }
+});
+
+test("recycled lyric lines clear stale romanization and wrap direct source text", async () => {
+  const environment = installInterceptorEnvironment("recycled", async () =>
+    lyricsResponse(["नमस्ते"], "hi"),
+  );
+  global.Node = { TEXT_NODE: 3 };
+
+  const makeElement = (tagName) => {
+    let ownText = "";
+    const element = {
+      nodeType: 1,
+      tagName,
+      className: "",
+      childNodes: [],
+      parentElement: null,
+      isConnected: true,
+      classNames: new Set(),
+      get children() {
+        return this.childNodes.filter((child) => child.nodeType === 1);
+      },
+      get textContent() {
+        return this.childNodes.length > 0
+          ? this.childNodes.map((child) => child.textContent || "").join("")
+          : ownText;
+      },
+      set textContent(value) {
+        ownText = value || "";
+        this.childNodes = [];
+      },
+      classList: {
+        add(name) {
+          element.classNames.add(name);
+        },
+        remove(name) {
+          element.classNames.delete(name);
+        },
+        contains(name) {
+          return element.classNames.has(name);
+        },
+      },
+      appendChild(child) {
+        if (child.parentElement) {
+          const index = child.parentElement.childNodes.indexOf(child);
+          if (index >= 0) child.parentElement.childNodes.splice(index, 1);
+        }
+        this.childNodes.push(child);
+        child.parentElement = this;
+        return child;
+      },
+      insertBefore(child, reference) {
+        const index = this.childNodes.indexOf(reference);
+        this.childNodes.splice(index >= 0 ? index : this.childNodes.length, 0, child);
+        child.parentElement = this;
+        return child;
+      },
+      remove() {
+        if (!this.parentElement) return;
+        const index = this.parentElement.childNodes.indexOf(this);
+        if (index >= 0) this.parentElement.childNodes.splice(index, 1);
+        this.parentElement = null;
+        this.isConnected = false;
+      },
+      querySelector(selector) {
+        if (selector !== ".scriptify-romanized") return null;
+        return this.childNodes.find(
+          (child) => child.className === "scriptify-romanized",
+        ) || null;
+      },
+      getAttribute() {
+        return null;
+      },
+      getBoundingClientRect() {
+        return { height: 0, top: 0 };
+      },
+      scrollIntoView() {},
+    };
+    return element;
+  };
+
+  const source = {
+    nodeType: 3,
+    parentElement: null,
+    isConnected: true,
+    textContent: "नमस्ते",
+  };
+  const line = makeElement("div");
+  line.appendChild(source);
+  global.document = {
+    documentElement: { style: { setProperty() {} } },
+    querySelector: () => null,
+    querySelectorAll(selector) {
+      if (selector === ".scriptify-romanized") {
+        const romanized = line.querySelector(selector);
+        return romanized ? [romanized] : [];
+      }
+      if (selector === ".scriptify-replace-line") {
+        return line.classList.contains("scriptify-replace-line") ? [line] : [];
+      }
+      return [line];
+    },
+    createElement: makeElement,
+  };
+  global.window = { innerHeight: 800 };
+
+  const interceptor = freshModule("lyricsInterceptor");
+  await interceptor.initLyricsInterceptor();
+  await interceptor.setDisplayStyle("replace-only");
+  await interceptor.setMode("romanized");
+
+  const original = line.children.find(
+    (child) => child.className === "scriptify-original",
+  );
+  assert.ok(original);
+  assert.equal(original.textContent, "नमस्ते");
+  assert.equal(line.querySelector(".scriptify-romanized").textContent, "Namaste");
+  assert.equal(line.classList.contains("scriptify-replace-line"), true);
+
+  // React reuses the same node for an unmapped Latin line.
+  source.textContent = "English";
+  for (const interval of environment.intervals) interval.callback();
+  assert.equal(line.querySelector(".scriptify-romanized"), null);
+  assert.equal(line.classList.contains("scriptify-replace-line"), false);
+  interceptor.destroyLyricsInterceptor();
 });
 
 test("LRCLIB caches definitive misses but not malformed server responses", async () => {
@@ -671,6 +910,7 @@ test("runtime styles inject once and remove cleanly", () => {
   injectStyles();
   assert.equal(appendCount, 1);
   assert.match(styles.get("scriptify-styles").textContent, /scriptify-romanized/);
+  assert.match(styles.get("scriptify-styles").textContent, /scriptify-original/);
   removeStyles();
   assert.equal(styles.has("scriptify-styles"), false);
 });
