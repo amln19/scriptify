@@ -5,14 +5,37 @@ const path = require("node:path");
 const test = require("node:test");
 const { buildSync } = require("esbuild");
 
+// Source modules intentionally log transport failures that the tests provoke.
+// Keep the default TAP output readable; set SCRIPTIFY_TEST_VERBOSE=1 to inspect
+// the extension's diagnostic logging while the suite runs.
+const originalConsole = {
+  log: console.log,
+  warn: console.warn,
+};
+if (process.env.SCRIPTIFY_TEST_VERBOSE !== "1") {
+  console.log = () => {};
+  console.warn = () => {};
+}
+
 const buildDirectory = fs.mkdtempSync(
   path.join(os.tmpdir(), "scriptify-regressions-"),
 );
 
-for (const entry of ["async", "lrclib", "lyricsInterceptor", "romanizer"]) {
+for (const entry of [
+  "async",
+  "lrclib",
+  "lyricsInterceptor",
+  "romanizer",
+  "scriptDetector",
+  "styles",
+]) {
   const source =
     entry === "async"
       ? "src/utils/async.ts"
+      : entry === "scriptDetector"
+        ? "src/utils/scriptDetector.ts"
+        : entry === "styles"
+          ? "src/components/styles.ts"
       : `src/services/${entry}.ts`;
   buildSync({
     entryPoints: [source],
@@ -24,7 +47,11 @@ for (const entry of ["async", "lrclib", "lyricsInterceptor", "romanizer"]) {
   });
 }
 
-test.after(() => fs.rmSync(buildDirectory, { recursive: true, force: true }));
+test.after(() => {
+  fs.rmSync(buildDirectory, { recursive: true, force: true });
+  console.log = originalConsole.log;
+  console.warn = originalConsole.warn;
+});
 
 function freshModule(name) {
   const modulePath = path.join(buildDirectory, `${name}.cjs`);
@@ -76,9 +103,12 @@ function installInterceptorEnvironment(trackId, cosmosGet) {
   const listeners = new Map();
   const intervals = new Set();
   const storage = new Map();
+  const styleValues = new Map();
 
   global.document = {
-    documentElement: { style: { setProperty() {} } },
+    documentElement: {
+      style: { setProperty: (name, value) => styleValues.set(name, value) },
+    },
     querySelector: () => null,
     querySelectorAll: () => [],
   };
@@ -120,7 +150,7 @@ function installInterceptorEnvironment(trackId, cosmosGet) {
     },
   };
 
-  return { intervals, listeners };
+  return { intervals, listeners, storage, styleValues };
 }
 
 function jsonResponse(status, body, headers = {}) {
@@ -132,6 +162,18 @@ function jsonResponse(status, body, headers = {}) {
     status,
     headers: { get: (key) => normalized.get(key.toLowerCase()) ?? null },
     json: async () => body,
+  };
+}
+
+function track(id, overrides = {}) {
+  return {
+    id,
+    uri: `spotify:track:${id}`,
+    name: "Track",
+    artist: "Artist",
+    album: "Album",
+    duration: 180_000,
+    ...overrides,
   };
 }
 
@@ -163,6 +205,60 @@ test("literal Indic tildes and Malayalam dictionary output survive post-processi
   const { romanize } = freshModule("romanizer");
   assert.equal(romanize("தமிழ் ~ நல்ல"), "Tamizh ~ nalla");
   assert.equal(romanize("വീട്ടിലേക്ക്"), "Veettilekku");
+});
+
+test("every claimed romanization engine converts a representative sample", () => {
+  const { romanize, setLanguageHint } = freshModule("romanizer");
+  const cases = [
+    ["hi", "नमस्ते", "Namaste"],
+    ["mr", "नमस्कार", "Namaskaar"],
+    ["sa", "नमस्ते", "Namaste"],
+    ["pa", "ਸਤ ਸ੍ਰੀ ਅਕਾਲ", "Sat sri akaal"],
+    ["bn", "বাংলা", "Banla"],
+    ["gu", "ગુજરાતી", "Gujaraati"],
+    ["or", "ଓଡ଼ିଆ", "Odaiaa"],
+    ["ta", "தமிழ்", "Tamizh"],
+    ["te", "తెలుగు", "Telugu"],
+    ["kn", "ಕನ್ನಡ", "Kannada"],
+    ["ml", "മലയാളം", "Malayaalam"],
+    ["ja", "がっこう", "Gakkou"],
+    ["ko", "안녕하세요", "Annyeonghaseyo"],
+    [null, "你好", "Nǐ hǎo"],
+  ];
+
+  for (const [language, input, expected] of cases) {
+    setLanguageHint(language);
+    assert.equal(romanize(input), expected, `${language ?? "cjk"}: ${input}`);
+  }
+});
+
+test("romanizer preserves Latin text, routes mixed scripts, and rejects unsupported scripts", () => {
+  const { hasRomanizableScript, romanize } = freshModule("romanizer");
+  assert.equal(romanize("Already Latin"), null);
+  assert.equal(romanize("   \n"), null);
+  assert.equal(romanize("Hello नमस्ते ਪੰਜਾਬੀ"), "Hello namaste panjaabi");
+  assert.equal(romanize("Привет"), null);
+  assert.equal(romanize("مرحبا"), null);
+  assert.equal(romanize("สวัสดี"), null);
+  assert.equal(hasRomanizableScript("१२३"), true);
+  assert.equal(hasRomanizableScript("Привет"), false);
+});
+
+test("script detection identifies dominant, mixed, and shared CJK scripts", () => {
+  const { ScriptType, detectAllScripts, detectScript, hasNonLatinScript } =
+    freshModule("scriptDetector");
+  assert.equal(detectScript("hello"), ScriptType.Latin);
+  assert.equal(detectScript("नमस्ते"), ScriptType.Devanagari);
+  assert.equal(detectScript("日本語"), ScriptType.CJK);
+  assert.equal(detectScript("日本語です"), ScriptType.Japanese);
+  assert.equal(detectScript("한국어 中"), ScriptType.Korean);
+  assert.equal(detectScript("123 !"), ScriptType.Unknown);
+  assert.deepEqual(
+    [...detectAllScripts("Hello नमस्ते")].sort(),
+    [ScriptType.Latin, ScriptType.Devanagari].sort(),
+  );
+  assert.equal(hasNonLatinScript("Hello 123"), false);
+  assert.equal(hasNonLatinScript("Hello नमस्ते"), true);
 });
 
 test("withTimeout rejects a request that never settles and runs cleanup", async () => {
@@ -368,4 +464,213 @@ test("LRCLIB transport failures are not negative-cached", async () => {
     { startTimeMs: 1_000, text: "recovered" },
   ]);
   assert.equal(calls, 2);
+});
+
+test("LRCLIB searches after an exact miss, selects the nearest synced result, and caches it", async () => {
+  const originalSetTimeout = global.setTimeout;
+  const requests = [];
+  global.setTimeout = (callback, delay) => {
+    if (delay === 250) {
+      queueMicrotask(callback);
+      return 1;
+    }
+    return originalSetTimeout(callback, delay);
+  };
+  global.fetch = async (url) => {
+    requests.push(url);
+    if (url.includes("/get?")) return jsonResponse(404, {});
+    return jsonResponse(200, [
+      { duration: 181, syncedLyrics: "[00:03]nearest" },
+      { duration: 500, syncedLyrics: "[00:04]far" },
+      { duration: 180, syncedLyrics: null },
+    ]);
+  };
+
+  try {
+    const { fetchLyrics } = freshModule("lrclib");
+    const requestedTrack = track("search-cache", {
+      name: "Song & Name",
+      artist: "The Artist",
+      album: "Album Name",
+    });
+    const first = await fetchLyrics(requestedTrack);
+    const second = await fetchLyrics(requestedTrack);
+
+    assert.equal(requests.length, 2);
+    assert.match(requests[0], /track_name=Song/);
+    assert.match(requests[0], /album_name=Album/);
+    assert.match(requests[1], /\/search\?/);
+    assert.deepEqual(first, [{ startTimeMs: 3_000, text: "nearest" }]);
+    assert.deepEqual(second, first);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+  }
+});
+
+test("LRCLIB caches definitive misses but not malformed server responses", async () => {
+  const originalSetTimeout = global.setTimeout;
+  global.setTimeout = (callback, delay) => {
+    if (delay === 250) {
+      queueMicrotask(callback);
+      return 1;
+    }
+    return originalSetTimeout(callback, delay);
+  };
+  let definitiveCalls = 0;
+  global.fetch = async () => {
+    definitiveCalls++;
+    return jsonResponse(404, {});
+  };
+
+  try {
+    const { fetchLyrics } = freshModule("lrclib");
+    const definitiveMiss = track("definitive-miss");
+    assert.equal(await fetchLyrics(definitiveMiss), null);
+    assert.equal(await fetchLyrics(definitiveMiss), null);
+    assert.equal(definitiveCalls, 2);
+
+    let malformedCalls = 0;
+    global.fetch = async () => {
+      malformedCalls++;
+      return jsonResponse(200, "not an LRCLIB object");
+    };
+    const malformed = track("malformed");
+    assert.equal(await fetchLyrics(malformed), null);
+    assert.equal(await fetchLyrics(malformed), null);
+    assert.equal(malformedCalls, 2);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+  }
+});
+
+test("getCurrentTrackInfo handles item, track fallback, and unavailable player data", () => {
+  const { getCurrentTrackInfo } = freshModule("lrclib");
+  global.Spicetify = {
+    Player: { data: trackData("item") },
+    URI: { from: (uri) => ({ id: uri.split(":").at(-1) }) },
+  };
+  assert.deepEqual(getCurrentTrackInfo(), track("item", { name: "Track item" }));
+
+  global.Spicetify.Player.data = {
+    track: {
+      uri: "spotify:track:fallback",
+      name: "Fallback",
+      metadata: { artist_name: "Artist" },
+    },
+    duration: 12_000,
+  };
+  assert.deepEqual(getCurrentTrackInfo(), {
+    id: "fallback",
+    uri: "spotify:track:fallback",
+    name: "Fallback",
+    artist: "Artist",
+    album: "",
+    duration: 12_000,
+  });
+
+  global.Spicetify.Player.data = undefined;
+  assert.equal(getCurrentTrackInfo(), null);
+});
+
+test("interceptor preferences persist valid values, reject invalid saved values, and clamp font size", async () => {
+  const environment = installInterceptorEnvironment("preferences", async () =>
+    lyricsResponse([]),
+  );
+  const interceptor = freshModule("lyricsInterceptor");
+  environment.storage.set("scriptify:mode", "romanized");
+  environment.storage.set("scriptify:displayStyle", "replace-only");
+  environment.storage.set("scriptify:fontSizeMultiplier", "1.25");
+
+  assert.equal(interceptor.loadSavedMode(), "romanized");
+  assert.equal(interceptor.loadSavedDisplayStyle(), "replace-only");
+  assert.equal(interceptor.loadSavedFontSize(), 1.25);
+  assert.equal(environment.styleValues.get("--scriptify-font-size"), "0.8999999999999999em");
+
+  const originalSetTimeout = global.setTimeout;
+  global.setTimeout = () => 0;
+  try {
+    interceptor.setRomanizedFontSize(5);
+    assert.equal(interceptor.getRomanizedFontSizeMultiplier(), 1.5);
+    assert.equal(environment.storage.get("scriptify:fontSizeMultiplier"), "1.5");
+    interceptor.setRomanizedFontSize(0);
+    assert.equal(interceptor.getRomanizedFontSizeMultiplier(), 0.5);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+  }
+
+  const modeEvents = [];
+  const unsubscribe = interceptor.onModeChange((mode) => modeEvents.push(mode));
+  await interceptor.setMode("original");
+  unsubscribe();
+  await interceptor.setMode("original");
+  assert.deepEqual(modeEvents, ["original"]);
+  interceptor.destroyLyricsInterceptor();
+
+  const invalidEnvironment = installInterceptorEnvironment("invalid", async () =>
+    lyricsResponse([]),
+  );
+  invalidEnvironment.storage.set("scriptify:mode", "invalid");
+  invalidEnvironment.storage.set("scriptify:displayStyle", "invalid");
+  invalidEnvironment.storage.set("scriptify:fontSizeMultiplier", "9");
+  const freshInterceptor = freshModule("lyricsInterceptor");
+  assert.equal(freshInterceptor.loadSavedMode(), "original");
+  assert.equal(freshInterceptor.loadSavedDisplayStyle(), "dual-line");
+  assert.equal(freshInterceptor.loadSavedFontSize(), 1);
+  freshInterceptor.destroyLyricsInterceptor();
+});
+
+test("scrollToCurrentLine uses active lyric markers and has a safe no-lyrics result", () => {
+  installInterceptorEnvironment("scroll", async () => lyricsResponse([]));
+  const scrollCalls = [];
+  const lines = [
+    {
+      getAttribute: () => null,
+      className: "lyrics-line",
+      scrollIntoView: (options) => scrollCalls.push(options),
+    },
+    {
+      getAttribute: (name) => (name === "aria-current" ? "true" : null),
+      className: "lyrics-line",
+      scrollIntoView: (options) => scrollCalls.push(options),
+    },
+  ];
+  global.document.querySelectorAll = () => lines;
+  const interceptor = freshModule("lyricsInterceptor");
+  assert.equal(interceptor.scrollToCurrentLine(), true);
+  assert.deepEqual(scrollCalls, [{ behavior: "smooth", block: "center" }]);
+
+  global.document.querySelectorAll = () => [];
+  assert.equal(interceptor.scrollToCurrentLine(), false);
+  interceptor.destroyLyricsInterceptor();
+});
+
+test("runtime styles inject once and remove cleanly", () => {
+  const styles = new Map();
+  let appendCount = 0;
+  global.document = {
+    getElementById: (id) => styles.get(id) ?? null,
+    createElement: () => {
+      const element = {
+        id: "",
+        textContent: "",
+        remove() {
+          styles.delete(this.id);
+        },
+      };
+      return element;
+    },
+    head: {
+      appendChild: (element) => {
+        appendCount++;
+        styles.set(element.id, element);
+      },
+    },
+  };
+  const { injectStyles, removeStyles } = freshModule("styles");
+  injectStyles();
+  injectStyles();
+  assert.equal(appendCount, 1);
+  assert.match(styles.get("scriptify-styles").textContent, /scriptify-romanized/);
+  removeStyles();
+  assert.equal(styles.has("scriptify-styles"), false);
 });

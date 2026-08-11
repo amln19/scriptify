@@ -89,7 +89,20 @@ Other scripts:
 | `npm run build`     | Production build (minified, no sourcemaps)                   |
 | `npm run watch`     | Dev build with file watching (unminified, inline sourcemaps) |
 | `npm run typecheck` | Run TypeScript type checking                                 |
+| `npm test`          | Run deterministic unit and regression tests                  |
 | `npm run clean`     | Remove the `dist/` directory                                 |
+
+### Testing
+
+`npm test` exercises the romanizers and script detector, LRCLIB parsing and
+network/error behavior, lyrics lifecycle and availability state, preference
+persistence, scrolling, and runtime style cleanup. It uses deterministic mocks
+for Spicetify, the DOM, fetch, and timers, so it does not require Spotify or a
+network connection.
+
+The live Spotify/Spicetify integration still needs manual smoke testing after
+Spotify updates: check a few supported scripts, rapid track/mode changes,
+lyrics-panel close/reopen, playbar controls, settings, and keyboard shortcuts.
 
 ## Environment Variables
 
