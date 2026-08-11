@@ -70,6 +70,18 @@ declare namespace Spicetify {
     ) => void;
   };
   const CosmosAsync: {
+    /** HTTP methods accepted by the current official Spicetify declaration. */
+    resolve: (
+      method: "DELETE" | "GET" | "HEAD" | "PATCH" | "POST" | "PUT" | "SUB",
+      url: string,
+      body?: Record<string, any>,
+      headers?: Record<string, string>,
+    ) => Promise<{
+      body: any;
+      headers: Record<string, string>;
+      status: number;
+      uri?: string;
+    }>;
     get: (
       url: string,
       body?: any,
@@ -90,7 +102,6 @@ declare namespace Spicetify {
       body?: any,
       headers?: Record<string, string>,
     ) => Promise<any>;
-    resolve: (method: string, args: any[]) => Promise<any>;
   };
   const URI: {
     from: (uri: string) => { type: string; id: string } | null;

@@ -152,10 +152,14 @@ function setPlaybarButtonDisabled(disabled: boolean): void {
 
 // ─── Keyboard Shortcut ───────────────────────────────────────────────────────
 
+let keydownHandler: ((e: KeyboardEvent) => void) | null = null;
+
 function registerKeyboardShortcut(): void {
-  document.addEventListener("keydown", async (e) => {
+  keydownHandler = async (e: KeyboardEvent) => {
+    if (!((e.ctrlKey || e.metaKey) && e.shiftKey)) return;
+
     // Ctrl/Cmd + Shift + L to cycle modes
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === "L") {
+    if (e.key === "L") {
       e.preventDefault();
       try {
         const newMode = await cycleMode();
@@ -164,17 +168,21 @@ function registerKeyboardShortcut(): void {
         console.warn("[Scriptify] Keyboard shortcut failed:", err);
       }
     }
-    // Ctrl/Cmd + Shift + ; to open settings
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === ";") {
+    // Ctrl/Cmd + Shift + ; to open settings.
+    // `key` carries the SHIFTED character, so this arrives as ":" on a US
+    // layout — matching only ";" meant the shortcut never fired. `code` is the
+    // physical key and covers layouts that shift it to something else again.
+    if (e.code === "Semicolon" || e.key === ";" || e.key === ":") {
       e.preventDefault();
       showSettings();
     }
     // Ctrl/Cmd + Shift + J to jump to current line
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === "J") {
+    if (e.key === "J") {
       e.preventDefault();
       scrollToCurrentLine();
     }
-  });
+  };
+  document.addEventListener("keydown", keydownHandler);
 }
 
 // ─── Startup Lyrics Pane Close ────────────────────────────────────────────────
@@ -260,6 +268,12 @@ main();
 (window as any).__scriptify_cleanup = () => {
   if (playbarButton?.deregister) {
     playbarButton.deregister();
+  }
+  // Must be removed explicitly: a stale handler would keep cycling modes
+  // alongside the reloaded instance's one, cancelling it out.
+  if (keydownHandler) {
+    document.removeEventListener("keydown", keydownHandler);
+    keydownHandler = null;
   }
   removeStyles();
   destroyLyricsInterceptor();

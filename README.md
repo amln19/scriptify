@@ -8,7 +8,7 @@ A Spicetify extension that adds a custom lyrics toggle to Spotify, enabling swit
 - **12+ writing systems** — Devanagari, Gurmukhi, Bengali, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam, Japanese (Hiragana/Katakana), Korean (Hangul), Chinese (Hanzi)
 - **Purpose-built Hindi romanizer** — direct Devanagari → Hinglish parser with schwa deletion, nuqta handling, and a 500+ word lookup dictionary for natural results (bypasses IAST entirely)
 - **Playbar integration** — button sits in the bottom-right now-playing bar, right next to the native lyrics/queue/volume controls
-- **Simple keyboard shortcuts** — `Ctrl+Shift+L` to toggle modes, `Ctrl+Shift+;` for settings
+- **Simple keyboard shortcuts** — `Ctrl+Shift+L` to toggle modes, `Ctrl+Shift+;` for settings, `Ctrl+Shift+J` to jump to the current line
 - **Persistent preferences** — mode choice is saved across sessions
 - **~Zero flash** — a narrow MutationObserver + 100ms interval engine re-applies replacements before React re-renders can flash the original script
 - **Graceful degradation** — if romanization fails, the extension silently falls back to original lyrics with no visible errors
@@ -16,7 +16,7 @@ A Spicetify extension that adds a custom lyrics toggle to Spotify, enabling swit
 ## Tech Stack
 
 - **TypeScript** — strict mode, full type coverage
-- **esbuild** — bundled as a single IIFE file (~214kb) for Spicetify's extension loader
+- **esbuild** — bundled as a single IIFE file (~236kb) for Spicetify's extension loader
 - **Spicetify API** — `Playbar.Button`, `PopupModal`, `CosmosAsync`, `Player` events, `LocalStorage`, `Platform.History`
 - **@indic-transliteration/sanscript** — IAST transliteration for non-Hindi Indic scripts (Tamil, Bengali, Gujarati, etc.)
 - **Spotify Internal Lyrics API** — `spclient.wg.spotify.com/color-lyrics/v2` for full lyrics + language detection
@@ -46,7 +46,7 @@ A Spicetify extension that adds a custom lyrics toggle to Spotify, enabling swit
    npm run build
    ```
 
-   This outputs `dist/scriptify.js` (~214kb).
+   This outputs `dist/scriptify.js` (~236kb).
 
 3. **Copy to Spicetify extensions folder:**
 
@@ -128,7 +128,7 @@ src/
 2. **Lyrics collection** — on mode change or song change, the interceptor collects all lyrics via Spotify's internal API (primary) and DOM scraping (secondary), with LRCLIB as a fallback
 3. **Processing** — lyrics are passed to the romanizer, which builds forward/reverse text replacement maps
 4. **DOM replacement** — a continuous 100ms interval + a narrow MutationObserver on the lyrics container re-apply replacements whenever React re-renders lyrics elements
-5. **Auto-stop** — the engine stops after 3 seconds of finding no lyrics elements (user navigated away) and restarts when lyrics reappear
+5. **Auto-stop** — the engine stops after 3 seconds of finding no lyrics elements (user navigated away) and hands off to a 1-second idle watcher that restarts it as soon as lyrics reappear — including when the panel is re-opened on the same track
 
 ### Romanization Engine
 
@@ -140,7 +140,12 @@ src/
 | Tamil, Bengali, Telugu, Kannada, Gujarati, Malayalam, Odia | Sanscript → IAST → diacritic stripping                                               |
 | Japanese (Hiragana/Katakana)                               | Built-in romaji lookup tables with compound kana and sokuon support                  |
 | Korean (Hangul)                                            | Hangul syllable decomposition → revised romanization                                 |
-| Chinese (Hanzi)                                            | Built-in pinyin map (500+ common characters)                                         |
+| Chinese (CJK)                                              | Built-in pinyin map (250 common characters; others pass through unchanged)           |
+
+Ideographs inside a Japanese or Korean line are treated as kanji/hanja rather than
+hanzi, so they are never given Mandarin readings; they are left as-is (there is no
+kanji reading dictionary). Cyrillic, Arabic and Thai are detected but have no
+romanizer, so the toggle stays greyed out for those songs instead of doing nothing.
 
 ## License
 

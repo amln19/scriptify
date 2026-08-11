@@ -67,24 +67,6 @@ export function injectStyles(): void {
       font-family: var(--font-family, 'CircularSp', 'Helvetica Neue', Helvetica, Arial, sans-serif);
     }
 
-    .scriptify-settings-select {
-      width: 100%;
-      padding: 10px 12px;
-      border-radius: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      background: rgba(255, 255, 255, 0.07);
-      color: var(--text-base, #ffffff);
-      font-size: 14px;
-      font-family: var(--font-family, 'CircularSp', 'Helvetica Neue', Helvetica, Arial, sans-serif);
-      appearance: none;
-      cursor: pointer;
-      outline: none;
-    }
-
-    .scriptify-settings-select:focus {
-      border-color: var(--text-bright-accent, #1db954);
-    }
-
     .scriptify-mode-buttons {
       display: flex;
       gap: 8px;

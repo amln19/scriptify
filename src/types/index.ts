@@ -15,8 +15,6 @@ export interface LyricLine {
   startTimeMs: number;
   /** The lyric text */
   text: string;
-  /** End time in milliseconds (optional, for word-level sync) */
-  endTimeMs?: number;
 }
 
 export interface TrackInfo {

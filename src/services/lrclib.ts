@@ -12,45 +12,111 @@
  */
 
 import type { LyricLine, LRCLibResponse, TrackInfo } from "../types";
+import { withTimeout } from "../utils/async";
 
 const LRCLIB_BASE = "https://lrclib.net/api";
 const LYRICS_CACHE = new Map<string, LyricLine[] | null>();
 const MAX_CACHE_SIZE = 30;
+const REQUEST_TIMEOUT_MS = 8_000;
+const FALLBACK_REQUEST_DELAY_MS = 250;
+const LRCLIB_CLIENT =
+  "Scriptify v1.0 (https://github.com/amln19/scriptify)";
 
-/**
- * Parse an LRC timestamp "[mm:ss.xx]" to milliseconds.
- */
-function parseLrcTimestamp(timestamp: string): number {
-  const match = timestamp.match(/\[(\d+):(\d+)\.(\d+)\]/);
-  if (!match) return 0;
-
-  const minutes = parseInt(match[1], 10);
-  const seconds = parseInt(match[2], 10);
-  const centiseconds = parseInt(match[3], 10);
-
-  return minutes * 60 * 1000 + seconds * 1000 + centiseconds * 10;
+class RateLimitError extends Error {
+  constructor(readonly retryAfterMs: number) {
+    super(`LRCLIB rate limited; retry after ${retryAfterMs}ms`);
+    this.name = "RateLimitError";
+  }
 }
+
+function parseRetryAfter(value: string | null): number {
+  if (!value) return 1_000;
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+
+  const dateMs = Date.parse(value);
+  if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
+  return 1_000;
+}
+
+async function requestJson(url: string): Promise<unknown | null> {
+  const controller = new AbortController();
+  const response = await withTimeout(
+    fetch(url, {
+      headers: { "Lrclib-Client": LRCLIB_CLIENT },
+      signal: controller.signal,
+    }),
+    REQUEST_TIMEOUT_MS,
+    "LRCLIB request",
+    () => controller.abort(),
+  );
+
+  if (response.status === 429) {
+    throw new RateLimitError(
+      parseRetryAfter(response.headers.get("Retry-After")),
+    );
+  }
+  if (response.status >= 500) {
+    throw new Error(`LRCLIB server error: ${response.status}`);
+  }
+  if (!response.ok) return null;
+  return response.json();
+}
+
+async function requestJsonWithRateLimitRetry(
+  url: string,
+): Promise<unknown | null> {
+  try {
+    return await requestJson(url);
+  } catch (error) {
+    if (!(error instanceof RateLimitError)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, error.retryAfterMs));
+    return requestJson(url);
+  }
+}
+
+/** Matches one leading "[mm:ss.xx]" / "[mm:ss]" timestamp tag. */
+const LRC_TIMESTAMP = /^\[(\d+):(\d+)(?:[.:](\d+))?\]/;
 
 /**
  * Parse raw LRC text into structured LyricLine array.
+ *
+ * A line may carry SEVERAL timestamps when the same words recur (a chorus):
+ * "[00:20.00][01:05.00]text". Each one becomes its own entry — matching only
+ * the first tag would leave "[01:05.00]text" as the lyric and get it dropped
+ * by the metadata filter below.
  */
 function parseLrc(lrcText: string): LyricLine[] {
   const lines: LyricLine[] = [];
 
   for (const rawLine of lrcText.split("\n")) {
-    const trimmed = rawLine.trim();
-    if (!trimmed) continue;
+    let rest = rawLine.trim();
+    if (!rest) continue;
 
-    const match = trimmed.match(/^\[(\d+:\d+\.\d+)\]\s*(.*)/);
-    if (!match) continue;
+    // Consume every leading timestamp tag
+    const timestamps: number[] = [];
+    let match = rest.match(LRC_TIMESTAMP);
+    while (match) {
+      const minutes = parseInt(match[1], 10);
+      const seconds = parseInt(match[2], 10);
+      // Fractions are hundredths ("12" = 120 ms) unless three digits are given
+      const fraction = match[3] ?? "0";
+      const fractionMs =
+        parseInt(fraction, 10) * (fraction.length >= 3 ? 1 : 10);
+      timestamps.push(minutes * 60 * 1000 + seconds * 1000 + fractionMs);
+      rest = rest.slice(match[0].length);
+      match = rest.match(LRC_TIMESTAMP);
+    }
 
-    const timeMs = parseLrcTimestamp(`[${match[1]}]`);
-    const text = match[2].trim();
+    if (timestamps.length === 0) continue; // metadata tag or junk
 
-    // Skip empty lyric lines and metadata tags
-    if (text.length === 0 || text.startsWith("[")) continue;
+    const text = rest.trim();
+    if (text.length === 0) continue; // timing-only line
 
-    lines.push({ startTimeMs: timeMs, text });
+    for (const startTimeMs of timestamps) {
+      lines.push({ startTimeMs, text });
+    }
   }
 
   // Sort by time
@@ -63,59 +129,56 @@ function parseLrc(lrcText: string): LyricLine[] {
  * Fetch lyrics from LRCLIB by exact match (track name + artist + duration).
  */
 async function fetchExact(track: TrackInfo): Promise<LRCLibResponse | null> {
-  try {
-    const params = new URLSearchParams({
-      track_name: track.name,
-      artist_name: track.artist,
-      duration: Math.round(track.duration / 1000).toString(),
-    });
+  const params = new URLSearchParams({
+    track_name: track.name,
+    artist_name: track.artist,
+    duration: Math.round(track.duration / 1000).toString(),
+  });
 
-    if (track.album) {
-      params.set("album_name", track.album);
-    }
-
-    const response = await fetch(`${LRCLIB_BASE}/get?${params}`, {
-      headers: { "User-Agent": "Scriptify Spicetify Extension v1.0" },
-    });
-
-    if (!response.ok) return null;
-    return await response.json();
-  } catch {
-    return null;
+  if (track.album) {
+    params.set("album_name", track.album);
   }
+
+  const result = await requestJsonWithRateLimitRetry(
+    `${LRCLIB_BASE}/get?${params}`,
+  );
+  if (result === null) return null;
+  if (typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("Unexpected LRCLIB exact-match response");
+  }
+
+  return result as LRCLibResponse;
 }
 
 /**
  * Fetch lyrics from LRCLIB by search (more relaxed matching).
  */
 async function fetchSearch(track: TrackInfo): Promise<LRCLibResponse | null> {
-  try {
-    const query = `${track.name} ${track.artist}`;
-    const params = new URLSearchParams({ q: query });
+  const query = `${track.name} ${track.artist}`;
+  const params = new URLSearchParams({ q: query });
 
-    const response = await fetch(`${LRCLIB_BASE}/search?${params}`, {
-      headers: { "User-Agent": "Scriptify Spicetify Extension v1.0" },
-    });
-
-    if (!response.ok) return null;
-
-    const results: LRCLibResponse[] = await response.json();
-    if (!results || results.length === 0) return null;
-
-    // Find best match by duration proximity
-    const targetDuration = track.duration / 1000;
-    const sorted = results
-      .filter((r) => r.syncedLyrics) // Only want synced lyrics
-      .sort(
-        (a, b) =>
-          Math.abs(a.duration - targetDuration) -
-          Math.abs(b.duration - targetDuration),
-      );
-
-    return sorted[0] || null;
-  } catch {
-    return null;
+  const result = await requestJsonWithRateLimitRetry(
+    `${LRCLIB_BASE}/search?${params}`,
+  );
+  if (result === null) return null;
+  if (!Array.isArray(result)) {
+    throw new Error("Unexpected LRCLIB search response");
   }
+
+  const results = result as LRCLibResponse[];
+  if (results.length === 0) return null;
+
+  // Find best match by duration proximity
+  const targetDuration = track.duration / 1000;
+  const sorted = results
+    .filter((r) => r.syncedLyrics) // Only want synced lyrics
+    .sort(
+      (a, b) =>
+        Math.abs(a.duration - targetDuration) -
+        Math.abs(b.duration - targetDuration),
+    );
+
+  return sorted[0] || null;
 }
 
 /**
@@ -165,6 +228,10 @@ export async function fetchLyrics(
 
     // Fallback to search
     if (!response?.syncedLyrics) {
+      // LRCLIB asks clients to leave a short gap between sequential requests.
+      await new Promise((resolve) =>
+        setTimeout(resolve, FALLBACK_REQUEST_DELAY_MS),
+      );
       response = await fetchSearch(track);
     }
 
@@ -185,7 +252,8 @@ export async function fetchLyrics(
     return lines;
   } catch (e) {
     console.warn("[Scriptify] LRCLIB fetch failed:", e);
-    LYRICS_CACHE.set(track.id, null);
+    // Transport, timeout, rate-limit, and schema failures are transient. Do not
+    // turn them into a session-long negative cache entry.
     return null;
   }
 }

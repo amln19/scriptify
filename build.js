@@ -24,10 +24,8 @@ const buildOptions = {
   define: {
     "process.env.NODE_ENV": isWatch ? '"development"' : '"production"',
   },
-  // React is provided by Spicetify at runtime; don't bundle it
-  external: [],
-  // Handle the sanscript import
-  alias: {},
+  // Nothing is marked external: React is never imported (JSX compiles to
+  // Spicetify.React.*), and sanscript must be bundled in for the IIFE.
   loader: {
     ".tsx": "tsx",
     ".ts": "ts",
@@ -46,12 +44,10 @@ async function build() {
     await ctx.watch();
     console.log("[Scriptify] Watching for changes...");
   } else {
-    const result = await esbuild.build(buildOptions);
+    // esbuild.build() rejects on error, so reaching this line means success —
+    // the catch below reports failures.
+    await esbuild.build(buildOptions);
     console.log("[Scriptify] Build complete!");
-    if (result.errors.length > 0) {
-      console.error("Build errors:", result.errors);
-      process.exit(1);
-    }
   }
 }
 

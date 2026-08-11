@@ -1268,6 +1268,11 @@ const IAST_DIACRITIC_MAP: Record<string, string> = {
   È: "E", // uppercase grave-accent e
   Ò: "O", // uppercase grave-accent o
   // ── Combining marks ──
+  // Sanscript's IAST output represents chandrabindu (ँ ঁ ఁ …) as an ASCII
+  // tilde attached to the preceding syllable ("ka~"), so this entry is
+  // load-bearing. Literal tildes present in the ORIGINAL lyric text are
+  // protected by TILDE_MARKER in romanizeIndic() before Sanscript runs, so
+  // they never reach this map.
   "~": "n",
   "\u0303": "n", // combining tilde
   "\u0323": "", // combining dot below (U+0323)
@@ -1783,6 +1788,18 @@ function restoreBengaliDictionary(
   );
 }
 
+/**
+ * Placeholder for tildes that were present in the ORIGINAL lyric text.
+ *
+ * Sanscript emits an ASCII "~" of its own for chandrabindu (ँ ঁ ఁ), which
+ * stripIASTDiacritics() maps to "n". Without this guard a decorative tilde in
+ * the lyrics ("தமிழ் ~ நல்ல") would be misread as nasalization and turned into
+ * a stray "n". Swapping input tildes for a marker before Sanscript runs keeps
+ * the two kinds of tilde distinguishable; restoreTildes() puts them back last.
+ * ASCII SO (\x0E) never appears in Indic Unicode or Sanscript IAST output.
+ */
+const TILDE_MARKER = "\x0E";
+
 /** Maps ScriptType to @indic-transliteration/sanscript scheme names */
 const INDIC_SCHEME_MAP: Record<string, string> = {
   [ScriptType.Devanagari]: "devanagari",
@@ -1864,6 +1881,9 @@ function romanizeIndic(text: string, script: ScriptType): string | null {
       sanscriptInput = markedText;
       bengaliDictReplacements = replacements;
     }
+    // Protect tildes that came from the lyrics themselves — see TILDE_MARKER.
+    sanscriptInput = sanscriptInput.replace(/~/g, TILDE_MARKER);
+
     let result = Sanscript.t(sanscriptInput, scheme, "iast");
 
     // ── Script-specific IAST pre-processing (before generic strip) ──
@@ -2025,7 +2045,7 @@ function romanizeIndic(text: string, script: ScriptType): string | null {
       result = result.replace(/(?<!s)t(?!h)/g, "th"); // single ത → th (but not in str-)
       result = result.replace(/ṟṟ/g, "tt"); // ṟṟ alveolar-r geminate → tt
       result = result.replace(/ṭṭ/g, "tt").replace(/Ṭṭ/g, "Tt"); // ട്ട geminate → "tt" (വീട്ടു = veettu, not veeddhu)
-      result = result.replace(/ṭh/g, "d").replace(/Ṭ/g, "D"); // aspirated retroflex → d
+      result = result.replace(/ṭh/g, "d").replace(/Ṭh/g, "D"); // aspirated retroflex → d
       result = result.replace(/ṭ/g, "d").replace(/Ṭ/g, "D"); // retroflex ṭ → d
 
       // 5. ṃ before labials → m  (homorganic nasal: ഗാനംപോലെ → gaanampole)
@@ -2235,14 +2255,6 @@ function romanizeIndic(text: string, script: ScriptType): string | null {
       // generic ī→ee is in stripIASTDiacritics, nothing extra needed.
     }
 
-    // Restore Malayalam dictionary placeholders.
-    if (
-      script === ScriptType.Malayalam &&
-      malayalamDictReplacements.length > 0
-    ) {
-      result = restoreMalayalamDictionary(result, malayalamDictReplacements);
-    }
-
     // Malayalam: word-final consonant cluster → append inherent "u".
     // Malayalam's inherent schwa surfaces as 'u' word-finally (unlike Hindi where
     // it is deleted, or Sanskrit where it stays 'a'). Sanscript suppresses the
@@ -2257,6 +2269,17 @@ function romanizeIndic(text: string, script: ScriptType): string | null {
         /([bcdfghjklmnpqrstvwxyz]{2,})(?!\p{L})/gu,
         "$1u",
       );
+    }
+
+    // Restore Malayalam dictionary placeholders — like the Tamil/Marathi/Bengali
+    // dictionaries, this must run AFTER every Malayalam rule (in particular the
+    // word-final "u" rule above, which would otherwise append a stray vowel to a
+    // pre-computed value ending in a consonant cluster).
+    if (
+      script === ScriptType.Malayalam &&
+      malayalamDictReplacements.length > 0
+    ) {
+      result = restoreMalayalamDictionary(result, malayalamDictReplacements);
     }
 
     // ─── Gujarati post-processing ────────────────────────────────────────────
@@ -2341,6 +2364,11 @@ function romanizeIndic(text: string, script: ScriptType): string | null {
     // Restore Bengali dictionary placeholders.
     if (script === ScriptType.Bengali && bengaliDictReplacements.length > 0) {
       result = restoreBengaliDictionary(result, bengaliDictReplacements);
+    }
+
+    // Put back tildes that came from the lyrics (never chandrabindu ones).
+    if (result.includes(TILDE_MARKER)) {
+      result = result.split(TILDE_MARKER).join("~");
     }
 
     return result;
@@ -2660,10 +2688,15 @@ function romanizeGurmukhiDirect(text: string): string {
 // ─── 6. Japanese ─────────────────────────────────────────────────────────────
 
 const HIRAGANA_MAP: Record<string, string> = {
+  ぁ: "a",
   あ: "a",
+  ぃ: "i",
   い: "i",
+  ぅ: "u",
   う: "u",
+  ぇ: "e",
   え: "e",
+  ぉ: "o",
   お: "o",
   か: "ka",
   き: "ki",
@@ -2767,8 +2800,31 @@ const HIRAGANA_MAP: Record<string, string> = {
   ぴゃ: "pya",
   ぴゅ: "pyu",
   ぴょ: "pyo",
+  // Modern loanword combinations
+  うぃ: "wi",
+  うぇ: "we",
+  うぉ: "wo",
+  しぇ: "she",
+  じぇ: "je",
+  ちぇ: "che",
+  てぃ: "ti",
+  でぃ: "di",
+  とぅ: "tu",
+  どぅ: "du",
+  つぁ: "tsa",
+  つぃ: "tsi",
+  つぇ: "tse",
+  つぉ: "tso",
+  ふぁ: "fa",
+  ふぃ: "fi",
+  ふぇ: "fe",
+  ふぉ: "fo",
+  ゔ: "vu",
+  ゔぁ: "va",
+  ゔぃ: "vi",
+  ゔぇ: "ve",
+  ゔぉ: "vo",
   っ: "", // Double consonant marker (handled in context)
-  ー: "-",
 };
 
 const KATAKANA_MAP: Record<string, string> = {};
@@ -2788,8 +2844,18 @@ for (const [hira, romaji] of Object.entries(HIRAGANA_MAP)) {
   KATAKANA_MAP[kata] = romaji;
 }
 // Extra katakana-only
-KATAKANA_MAP["ー"] = "-";
 KATAKANA_MAP["ヴ"] = "vu";
+
+function getLastRomanizedVowel(text: string): string {
+  for (let i = text.length - 1; i >= 0; i--) {
+    const ch = text[i].toLowerCase();
+    if (ch === "a" || ch === "e" || ch === "i" || ch === "o" || ch === "u") {
+      return ch;
+    }
+    if (/[a-z]/i.test(ch)) return "";
+  }
+  return "";
+}
 
 function romanizeJapanese(text: string): string {
   const combined = { ...HIRAGANA_MAP, ...KATAKANA_MAP };
@@ -2798,6 +2864,14 @@ function romanizeJapanese(text: string): string {
   const chars = Array.from(text);
 
   while (i < chars.length) {
+    // Prolonged sound mark: repeat the preceding romanized vowel rather than
+    // emitting punctuation (スーパー → suupaa).
+    if (chars[i] === "ー") {
+      result += getLastRomanizedVowel(result);
+      i++;
+      continue;
+    }
+
     // Try two-character compound first
     if (i + 1 < chars.length) {
       const pair = chars[i] + chars[i + 1];
@@ -2913,7 +2987,10 @@ const KOREAN_FINALS = [
 
 function romanizeKorean(text: string): string {
   let result = "";
-  for (const char of text) {
+  // Canonically decomposed Hangul Jamo composes into the same syllables as NFC
+  // input. Without this, equivalent NFD lyrics were detected as Korean but
+  // passed through untouched.
+  for (const char of text.normalize("NFC")) {
     const code = char.codePointAt(0)!;
     if (code >= 0xac00 && code <= 0xd7a3) {
       const offset = code - 0xac00;
@@ -3198,10 +3275,69 @@ function romanizeChinese(text: string): string {
       result += char;
     }
   }
-  return result.replace(/\s+/g, " ").trim();
+  // Collapse the spaces introduced above, but do NOT trim: on a mixed-script
+  // line this is one segment of many, and trimming would glue it to the next
+  // segment's first word. romanize() trims the assembled line.
+  return result.replace(/\s+/g, " ");
 }
 
 // ─── 9. Script Routing ───────────────────────────────────────────────────────
+
+/**
+ * Scripts that actually have a romanization engine behind them.
+ * Must be kept in sync with the switch in romanizeSegment() — anything absent
+ * here is detected but passed through untouched (Cyrillic, Arabic, Thai).
+ */
+const ROMANIZABLE_SCRIPTS: ReadonlySet<ScriptType> = new Set([
+  ScriptType.Devanagari,
+  ScriptType.Tamil,
+  ScriptType.Bengali,
+  ScriptType.Telugu,
+  ScriptType.Kannada,
+  ScriptType.Gujarati,
+  ScriptType.Malayalam,
+  ScriptType.Gurmukhi,
+  ScriptType.Odia,
+  ScriptType.Japanese,
+  ScriptType.Korean,
+  ScriptType.CJK,
+]);
+
+/**
+ * Does this text contain any script Scriptify can actually romanize?
+ *
+ * Distinct from hasNonLatinScript(): a Cyrillic or Arabic line IS non-Latin but
+ * has no engine, so offering the toggle for it would be a no-op.
+ */
+export function hasRomanizableScript(text: string): boolean {
+  const scripts = detectAllScripts(text);
+  if (![...scripts].some((script) => ROMANIZABLE_SCRIPTS.has(script))) {
+    return false;
+  }
+
+  // Block membership alone overstates capability for partial engines such as
+  // the finite CJK map and decomposed/compatibility Hangul. The public answer
+  // should reflect whether this exact text can actually change.
+  const result = romanize(text);
+  return result !== null && result !== text;
+}
+
+/**
+ * CJK ideographs are shared: they are Chinese hanzi, Japanese kanji AND Korean
+ * hanja. When a line also carries kana or Hangul, its ideographs belong to that
+ * language, and sending them to the pinyin map would print Mandarin readings in
+ * the middle of a Japanese line (心の中で → "Xīnnozhōngde"). detectScript()
+ * already reconciles this for a whole string; per-character segmentation has to
+ * apply the same rule explicitly.
+ *
+ * Returns the language that owns the line's ideographs, or null if plain CJK.
+ */
+function resolveCJKHost(scripts: Set<ScriptType>): ScriptType | null {
+  if (!scripts.has(ScriptType.CJK)) return null;
+  if (scripts.has(ScriptType.Japanese)) return ScriptType.Japanese;
+  if (scripts.has(ScriptType.Korean)) return ScriptType.Korean;
+  return null;
+}
 
 /**
  * Dispatch a single same-script text segment to the correct romanizer.
@@ -3266,6 +3402,14 @@ export function romanize(text: string): string | null {
   if (!hasNonLatinScript(text)) return null;
 
   const allScripts = detectAllScripts(text);
+
+  // Kanji/hanja belong to the kana or Hangul they sit next to, not to Chinese.
+  const cjkHost = resolveCJKHost(allScripts);
+  if (cjkHost) {
+    allScripts.delete(ScriptType.CJK);
+    allScripts.add(cjkHost);
+  }
+
   const nonLatinScripts = new Set(
     [...allScripts].filter((s) => s !== ScriptType.Latin),
   );
@@ -3277,6 +3421,7 @@ export function romanize(text: string): string | null {
     const r = romanizeSegment(text, singleScript);
     if (!r) return null;
     return r
+      .trim()
       .replace(/^[a-z]/, (c) => c.toUpperCase())
       .replace(/([.!?]\s+)([a-z])/g, (_, punc, ch) => punc + ch.toUpperCase());
   }
@@ -3304,7 +3449,9 @@ export function romanize(text: string): string | null {
       current += char;
       continue;
     }
-    const charScript = detectScript(char);
+    let charScript = detectScript(char);
+    // Route this line's ideographs to the language that owns them (see above).
+    if (cjkHost && charScript === ScriptType.CJK) charScript = cjkHost;
     if (charScript !== currentSegScript) {
       if (current.length > 0) {
         const isLatin =

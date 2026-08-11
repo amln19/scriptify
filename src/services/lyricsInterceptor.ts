@@ -17,10 +17,20 @@
  * re-inject the romanized sub-elements before the user notices.
  */
 
-import { LyricsMode, DisplayStyle, type LyricLine } from "../types";
-import { romanize, initRomanizer, setLanguageHint } from "./romanizer";
+import {
+  LyricsMode,
+  DisplayStyle,
+  type LyricLine,
+  type TrackInfo,
+} from "../types";
+import {
+  romanize,
+  initRomanizer,
+  setLanguageHint,
+  hasRomanizableScript,
+} from "./romanizer";
 import { fetchLyrics, getCurrentTrackInfo } from "./lrclib";
-import { hasNonLatinScript } from "../utils/scriptDetector";
+import { withTimeout } from "../utils/async";
 
 // ─── Hard-coded CSS Class Names from css-map.json ─────────────────────────────
 
@@ -82,6 +92,11 @@ let forwardMap = new Map<string, string>();
 // Replacement interval (100 ms reliable fallback)
 let replaceInterval: ReturnType<typeof setInterval> | null = null;
 
+// Idle watcher — polls for the lyrics panel re-opening after the engine
+// auto-stopped. See startIdleWatch().
+let idleWatchInterval: ReturnType<typeof setInterval> | null = null;
+const IDLE_WATCH_INTERVAL_MS = 1000;
+
 // Lyrics-specific MutationObserver — narrow target, fast callback
 let lyricsObserver: MutationObserver | null = null;
 let lyricsObserverTarget: Element | null = null;
@@ -91,6 +106,19 @@ let cachedLyricElements: Element[] = [];
 
 // Guard flag — prevents observer from re-firing on our own DOM writes
 let isWriting = false;
+
+// Subscriptions owned by this module — held so destroyLyricsInterceptor() can
+// undo them. Without this a hot-reload stacks a second songchange handler and a
+// second History subscription on top of the live ones.
+let songChangeHandler: (() => void) | null = null;
+let historyUnsubscribe: (() => void) | null = null;
+
+// Invalidates async work whenever the track, mode, or interceptor lifecycle
+// changes. Async operations may cache track-keyed network results, but must not
+// mutate current UI/module state unless their captured generation is current.
+let stateGeneration = 0;
+let isDestroyed = false;
+const pendingSongChangeTimeouts = new Set<ReturnType<typeof setTimeout>>();
 
 // Cache for getTextElement() — avoids re-walking the DOM subtree of each
 // lyric line on every observer fire. Keyed on the line element; WeakMap
@@ -108,34 +136,77 @@ let displayStyle: DisplayStyle = DisplayStyle.DualLine;
 let romanizedFontSizeMultiplier = 1.0;
 const FONT_SIZE_BASE_EM = 0.72;
 
+function isStateCurrent(
+  generation: number,
+  trackId: string | null,
+  mode?: LyricsMode,
+): boolean {
+  return (
+    !isDestroyed &&
+    generation === stateGeneration &&
+    trackId === currentTrackId &&
+    (mode === undefined || mode === currentMode)
+  );
+}
+
+function cancelPendingSongChangeTimeouts(): void {
+  for (const timeout of pendingSongChangeTimeouts) clearTimeout(timeout);
+  pendingSongChangeTimeouts.clear();
+}
+
 // ─── Spotify Lyrics API ───────────────────────────────────────────────────────
 
-let spotifyLyricsCache = new Map<string, LyricLine[]>();
+/**
+ * Cached Spotify API result for one track.
+ * The language travels WITH the lines: it is per-track state that a bare
+ * lines-only cache would silently drop on a cache hit, leaving a Marathi or
+ * Sanskrit track to be romanized with Hindi rules on every replay.
+ * An empty `lines` array is a negative result ("API answered, no lyrics").
+ */
+interface CachedLyrics {
+  lines: LyricLine[];
+  language: string | null;
+}
 
-// Language detected from Spotify's lyrics API (ISO code: "hi", "mr", "sa", etc.)
-let detectedLanguage: string | null = null;
+let spotifyLyricsCache = new Map<string, CachedLyrics>();
+const SPOTIFY_REQUEST_TIMEOUT_MS = 8_000;
+
+function cacheSpotifyLyrics(trackId: string, entry: CachedLyrics): void {
+  if (spotifyLyricsCache.size >= 30) {
+    const firstKey = spotifyLyricsCache.keys().next().value;
+    if (firstKey) spotifyLyricsCache.delete(firstKey);
+  }
+  spotifyLyricsCache.set(trackId, entry);
+}
 
 async function fetchSpotifyLyrics(
   trackId: string,
-): Promise<LyricLine[] | null> {
-  if (spotifyLyricsCache.has(trackId)) {
-    return spotifyLyricsCache.get(trackId) || null;
-  }
+): Promise<CachedLyrics | null> {
+  const cached = spotifyLyricsCache.get(trackId);
+  if (cached) return cached;
 
   try {
-    const response = await Spicetify.CosmosAsync.get(
-      `https://spclient.wg.spotify.com/color-lyrics/v2/track/${trackId}?format=json&vocalRemoval=false&market=from_token`,
+    const response = await withTimeout(
+      Spicetify.CosmosAsync.get(
+        `https://spclient.wg.spotify.com/color-lyrics/v2/track/${trackId}?format=json&vocalRemoval=false&market=from_token`,
+      ),
+      SPOTIFY_REQUEST_TIMEOUT_MS,
+      "Spotify lyrics request",
     );
 
     if (!response?.lyrics?.lines) {
       console.log("[Scriptify] No lyrics from Spotify API for track:", trackId);
-      return null;
+      // Remember the negative answer so the availability check and each
+      // buildReplacementMaps() retry don't re-request it.
+      const empty = { lines: [], language: null };
+      cacheSpotifyLyrics(trackId, empty);
+      return empty;
     }
 
     // Extract language from Spotify lyrics API response
-    if (response.lyrics.language) {
-      detectedLanguage = response.lyrics.language;
-      console.log(`[Scriptify] Detected lyrics language: ${detectedLanguage}`);
+    const language: string | null = response.lyrics.language || null;
+    if (language) {
+      console.log(`[Scriptify] Detected lyrics language: ${language}`);
     }
 
     const lines: LyricLine[] = response.lyrics.lines
@@ -147,13 +218,12 @@ async function fetchSpotifyLyrics(
 
     console.log(`[Scriptify] Fetched ${lines.length} lyrics from Spotify API`);
 
-    if (spotifyLyricsCache.size >= 30) {
-      const firstKey = spotifyLyricsCache.keys().next().value;
-      if (firstKey) spotifyLyricsCache.delete(firstKey);
-    }
-    spotifyLyricsCache.set(trackId, lines);
-    return lines;
+    const entry = { lines, language };
+    cacheSpotifyLyrics(trackId, entry);
+    return entry;
   } catch (e) {
+    // Transport failure — deliberately NOT cached: the track may well have
+    // lyrics and the next attempt should be able to find them.
     console.warn("[Scriptify] Spotify lyrics API error:", e);
     return null;
   }
@@ -337,27 +407,23 @@ function readText(el: Element): string {
  * In replace-only mode, also hides the original text visually.
  */
 function injectRomanized(lineEl: Element, romanizedText: string): void {
+  // Keep the replace-line class in sync with the current display style on every
+  // path — including the "text changed" one below, which used to return early
+  // and leave a recycled line stuck in the previous style.
+  if (displayStyle === DisplayStyle.ReplaceOnly) {
+    lineEl.classList.add("scriptify-replace-line");
+  } else {
+    lineEl.classList.remove("scriptify-replace-line");
+  }
+
   // Check if we already injected for this line
   const existing = lineEl.querySelector(".scriptify-romanized");
   if (existing) {
-    // Already present with correct text
-    if (existing.textContent === romanizedText) {
-      // Ensure replace-line class is in sync with current display style
-      if (displayStyle === DisplayStyle.ReplaceOnly) {
-        lineEl.classList.add("scriptify-replace-line");
-      } else {
-        lineEl.classList.remove("scriptify-replace-line");
-      }
-      return;
-    }
     // Text changed (different line scrolled into this element) — update
-    existing.textContent = romanizedText;
+    if (existing.textContent !== romanizedText) {
+      existing.textContent = romanizedText;
+    }
     return;
-  }
-
-  // Apply replace-line class if in replace-only mode
-  if (displayStyle === DisplayStyle.ReplaceOnly) {
-    lineEl.classList.add("scriptify-replace-line");
   }
 
   // Create and inject
@@ -450,16 +516,24 @@ function restoreScrollToElement(el: Element, delayMs = 0): void {
  * Collect ALL original lyrics for the current track.
  * Uses Spotify API + DOM visible elements for completeness.
  */
-async function collectOriginals(): Promise<string[]> {
+interface CollectedOriginals {
+  originals: string[];
+  language: string | null;
+}
+
+async function collectOriginals(
+  trackInfo: TrackInfo | null,
+): Promise<CollectedOriginals> {
   const originals: string[] = [];
   const seen = new Set<string>();
+  let language: string | null = null;
 
   // Source 1: Spotify internal API (has ALL lyrics, not just visible)
-  const trackInfo = getCurrentTrackInfo();
   if (trackInfo) {
-    const apiLyrics = await fetchSpotifyLyrics(trackInfo.id);
-    if (apiLyrics) {
-      for (const line of apiLyrics) {
+    const spotifyResult = await fetchSpotifyLyrics(trackInfo.id);
+    if (spotifyResult) {
+      language = spotifyResult.language;
+      for (const line of spotifyResult.lines) {
         const text = line.text.trim();
         if (text && !seen.has(text)) {
           seen.add(text);
@@ -496,31 +570,55 @@ async function collectOriginals(): Promise<string[]> {
   console.log(
     `[Scriptify] Collected ${originals.length} original lyrics lines`,
   );
-  return originals;
+  return { originals, language };
 }
 
 /**
  * Build forward and reverse replacement maps for the current mode.
+ *
+ * Returns how many original lines were collected, which lets the caller tell
+ * "the lyrics haven't rendered yet" (retry is worthwhile) apart from "the
+ * lyrics are here but none of them can be romanized" (retrying is pointless).
  */
-async function buildReplacementMaps(mode: LyricsMode): Promise<void> {
-  forwardMap.clear();
+interface BuildReplacementResult {
+  originalCount: number;
+  replacementCount: number;
+  applied: boolean;
+}
 
-  if (mode === LyricsMode.Original) return;
-
-  const originals = await collectOriginals();
-  if (originals.length === 0) {
-    console.log("[Scriptify] No originals found, cannot build maps");
-    return;
+async function buildReplacementMaps(
+  mode: LyricsMode,
+  generation: number,
+  expectedTrackId: string | null,
+  trackInfo: TrackInfo | null,
+): Promise<BuildReplacementResult> {
+  if (mode === LyricsMode.Original) {
+    return { originalCount: 0, replacementCount: 0, applied: false };
   }
 
+  const { originals, language } = await collectOriginals(trackInfo);
+  if (!isStateCurrent(generation, expectedTrackId, mode)) {
+    return {
+      originalCount: originals.length,
+      replacementCount: 0,
+      applied: false,
+    };
+  }
+  if (originals.length === 0) {
+    console.log("[Scriptify] No originals found, cannot build maps");
+    return { originalCount: 0, replacementCount: 0, applied: true };
+  }
+
+  const nextMap = new Map<string, string>();
   if (mode === LyricsMode.Romanized) {
-    // Pass detected language to romanizer for script-appropriate post-processing
-    setLanguageHint(detectedLanguage);
+    // Pass this result's language to the romanizer. This work is synchronous,
+    // so another async operation cannot interleave after the current-state check.
+    setLanguageHint(language);
     let count = 0;
     for (const text of originals) {
       const romanized = romanize(text);
       if (romanized && romanized !== text) {
-        forwardMap.set(text, romanized);
+        nextMap.set(text, romanized);
         count++;
       }
     }
@@ -533,6 +631,22 @@ async function buildReplacementMaps(mode: LyricsMode): Promise<void> {
       );
     }
   }
+
+  if (!isStateCurrent(generation, expectedTrackId, mode)) {
+    return {
+      originalCount: originals.length,
+      replacementCount: nextMap.size,
+      applied: false,
+    };
+  }
+
+  // Commit atomically. Concurrent builders never share a partially built map.
+  forwardMap = nextMap;
+  return {
+    originalCount: originals.length,
+    replacementCount: nextMap.size,
+    applied: true,
+  };
 }
 
 // ─── Continuous Replacement Engine ────────────────────────────────────────────
@@ -589,7 +703,13 @@ function applyReplacements(): void {
     emptyTicks++;
     if (emptyTicks >= 30) {
       stopContinuousReplacement();
-      console.log("[Scriptify] Auto-stopped injection (no lyrics visible)");
+      // Hand over to the cheap idle watcher: re-opening the lyrics panel on the
+      // same track changes neither the route nor the song, so nothing else
+      // would ever restart the engine.
+      startIdleWatch();
+      console.log(
+        "[Scriptify] Auto-stopped injection (no lyrics visible; watching for their return)",
+      );
     }
     return;
   }
@@ -673,7 +793,36 @@ function ensureLyricsObserver(): void {
   lyricsObserverTarget = container;
 }
 
+/**
+ * Low-frequency watcher that runs INSTEAD of the 100 ms engine while the lyrics
+ * panel is closed. One DOM query per second is negligible next to the ten per
+ * second the engine does, and it means the user can close and re-open the panel
+ * on the same track without losing romanization until the next song.
+ */
+function startIdleWatch(): void {
+  if (idleWatchInterval || replaceInterval) return;
+  idleWatchInterval = setInterval(() => {
+    // Nothing left to re-apply — stop watching.
+    if (currentMode === LyricsMode.Original || forwardMap.size === 0) {
+      stopIdleWatch();
+      return;
+    }
+    if (findLyricLineElements().length > 0) {
+      console.log("[Scriptify] Lyrics reappeared — restarting injection");
+      startContinuousReplacement();
+    }
+  }, IDLE_WATCH_INTERVAL_MS);
+}
+
+function stopIdleWatch(): void {
+  if (idleWatchInterval) {
+    clearInterval(idleWatchInterval);
+    idleWatchInterval = null;
+  }
+}
+
 function startContinuousReplacement(): void {
+  stopIdleWatch();
   if (replaceInterval) return;
   emptyTicks = 0;
 
@@ -689,6 +838,7 @@ function startContinuousReplacement(): void {
 }
 
 function stopContinuousReplacement(): void {
+  stopIdleWatch();
   if (lyricsObserver) {
     lyricsObserver.disconnect();
     lyricsObserver = null;
@@ -711,6 +861,9 @@ function stopContinuousReplacement(): void {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function initLyricsInterceptor(): Promise<void> {
+  isDestroyed = false;
+  stateGeneration++;
+  cancelPendingSongChangeTimeouts();
   await initRomanizer();
 
   // Detect initial track
@@ -724,33 +877,55 @@ export async function initLyricsInterceptor(): Promise<void> {
 
   // Listen for track changes via Spicetify Player event
   try {
-    Spicetify.Player.addEventListener("songchange", () => {
+    songChangeHandler = () => {
       const info = getCurrentTrackInfo();
       const newId = info?.id || null;
 
       if (newId && newId !== currentTrackId) {
+        const generation = ++stateGeneration;
         currentTrackId = newId;
-        detectedLanguage = null;
+        cancelPendingSongChangeTimeouts();
+        stopContinuousReplacement();
+        removeAllRomanized();
+        forwardMap.clear();
         console.log(`[Scriptify] Song change: ${info?.name || "unknown"}`);
 
-        // Check lyrics availability immediately
-        checkAndNotifyAvailability(newId);
+        // Check lyrics availability immediately. Completion is ignored if a
+        // newer track/mode/lifecycle generation supersedes this one.
+        void checkAndNotifyAvailability(info!);
 
         if (currentMode !== LyricsMode.Original) {
           // Give Spotify time to render new lyrics before rebuilding maps
-          setTimeout(async () => {
-            await buildReplacementMaps(currentMode);
-            startContinuousReplacement();
+          const mode = currentMode;
+          const timeout = setTimeout(async () => {
+            pendingSongChangeTimeouts.delete(timeout);
+            if (!isStateCurrent(generation, newId, mode)) return;
+
+            const result = await buildReplacementMaps(
+              mode,
+              generation,
+              newId,
+              info!,
+            );
+            if (
+              result.applied &&
+              result.replacementCount > 0 &&
+              isStateCurrent(generation, newId, mode)
+            ) {
+              startContinuousReplacement();
+            }
           }, 1500);
+          pendingSongChangeTimeouts.add(timeout);
         }
       }
-    });
+    };
+    Spicetify.Player.addEventListener("songchange", songChangeHandler);
   } catch {}
 
   // Listen for navigation — restart engine when returning to lyrics,
   // stop when navigating away.
   try {
-    Spicetify.Platform.History.listen(() => {
+    historyUnsubscribe = Spicetify.Platform.History.listen(() => {
       const path = Spicetify.Platform?.History?.location?.pathname || "";
       const isLyrics = path.includes("/lyrics");
 
@@ -782,6 +957,10 @@ export async function cycleMode(): Promise<LyricsMode> {
 
 export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
   console.log(`[Scriptify] Setting mode: ${mode}`);
+  const generation = ++stateGeneration;
+  const expectedTrackId = currentTrackId;
+  const trackInfo = getCurrentTrackInfo();
+  cancelPendingSongChangeTimeouts();
 
   // Capture the currently visible line BEFORE any DOM height changes.
   // We'll scroll back to it after the toggle to preserve reading position.
@@ -813,12 +992,29 @@ export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
     const RETRY_DELAY = 2000;
 
     while (retries <= MAX_RETRIES) {
-      await buildReplacementMaps(mode);
-      if (forwardMap.size > 0) {
+      const result = await buildReplacementMaps(
+        mode,
+        generation,
+        expectedTrackId,
+        trackInfo,
+      );
+      if (!result.applied || !isStateCurrent(generation, expectedTrackId, mode)) {
+        return currentMode;
+      }
+      if (result.replacementCount > 0) {
         startContinuousReplacement();
         // Height increased (sub-elements injected) — wait for first injection
         // pass (~100ms interval) then restore scroll position
         if (anchorEl) restoreScrollToElement(anchorEl, 200);
+        break;
+      }
+      if (result.originalCount > 0) {
+        // The lyrics ARE here, they just can't be romanized (script we have no
+        // engine for, or already Latin). Retrying only spends 10 s repeating
+        // the same work, so stop now.
+        console.warn(
+          "[Scriptify] Lyrics found but nothing to romanize — leaving them as-is",
+        );
         break;
       }
       if (retries < MAX_RETRIES) {
@@ -827,8 +1023,11 @@ export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
           `[Scriptify] No lyrics yet, retrying in ${RETRY_DELAY}ms (${retries}/${MAX_RETRIES})`,
         );
         await new Promise((r) => setTimeout(r, RETRY_DELAY));
-        // Bail if mode changed while we were waiting
-        if (currentMode !== mode) return currentMode;
+        // Bail if track, mode, lifecycle, or another operation changed while
+        // this retry was waiting.
+        if (!isStateCurrent(generation, expectedTrackId, mode)) {
+          return currentMode;
+        }
       } else {
         console.warn(
           "[Scriptify] No replacements built — lyrics may already be in target script",
@@ -837,6 +1036,8 @@ export async function setMode(mode: LyricsMode): Promise<LyricsMode> {
       }
     }
   }
+
+  if (!isStateCurrent(generation, expectedTrackId, mode)) return currentMode;
 
   // Notify subscribers
   for (const cb of modeChangeCallbacks) {
@@ -984,36 +1185,72 @@ export function onLyricsAvailabilityChange(
 }
 
 /**
- * Check whether ALL lyrics lines are already in Latin/romanized script.
- * If no line contains any non-Latin characters, Scriptify's romanization
- * is unnecessary — the lyrics are already readable.
+ * Can Scriptify actually do anything with these lyrics?
+ *
+ * Requires at least one line in a script we have an engine for. Checking merely
+ * for "non-Latin" is not enough: a Russian, Arabic or Thai song is non-Latin but
+ * has no romanizer behind it, so the button would light up and do nothing.
  */
-function areLyricsAlreadyRomanized(lyrics: LyricLine[]): boolean {
-  // Every line must be purely Latin (no Devanagari, Gurmukhi, etc.)
+function hasRomanizableLyrics(
+  lyrics: LyricLine[],
+  language: string | null,
+): boolean {
+  setLanguageHint(language);
   for (const line of lyrics) {
     const text = line.text.trim();
     if (text.length === 0) continue; // skip empty lines
-    if (hasNonLatinScript(text)) return false; // found a non-Latin line
+    if (hasRomanizableScript(text)) return true;
   }
-  return true;
+  return false;
+}
+
+async function getLyricsForAvailability(
+  trackInfo: TrackInfo,
+): Promise<{ lines: LyricLine[]; language: string | null }> {
+  const spotifyResult = await fetchSpotifyLyrics(trackInfo.id);
+  if (spotifyResult && spotifyResult.lines.length > 0) {
+    return spotifyResult;
+  }
+
+  // Spotify being unavailable is not proof that Scriptify has nothing to do.
+  // Prefer already-rendered lyrics, then use the documented LRCLIB fallback.
+  const domLines = findLyricLineElements()
+    .map((element) => readText(element))
+    .filter((text) => text.length > 0)
+    .map((text) => ({ startTimeMs: 0, text }));
+  if (domLines.length > 0) return { lines: domLines, language: null };
+
+  const lrclibLines = await fetchLyrics(trackInfo);
+  return { lines: lrclibLines || [], language: null };
 }
 
 /**
  * Check lyrics availability for a track and notify subscribers.
- * "Available" for Scriptify means: lyrics exist AND they contain at least
- * one non-Latin line (otherwise romanization would be pointless).
+ * "Available" for Scriptify means: lyrics exist AND at least one line is in a
+ * script we can romanize (otherwise the toggle would be a no-op).
+ *
+ * @param force - notify subscribers even if the value didn't change (used for
+ *                the first check, where `lyricsAvailable` still holds its
+ *                optimistic default).
  */
-async function checkAndNotifyAvailability(trackId: string): Promise<void> {
-  const lyrics = await fetchSpotifyLyrics(trackId);
-  let available = lyrics !== null && lyrics.length > 0;
-  // If lyrics exist but are already all-Latin, Scriptify has nothing to do
-  if (available && lyrics && areLyricsAlreadyRomanized(lyrics)) {
+async function checkAndNotifyAvailability(
+  trackInfo: TrackInfo,
+  force = false,
+): Promise<void> {
+  const result = await getLyricsForAvailability(trackInfo);
+  if (isDestroyed || currentTrackId !== trackInfo.id) return;
+
+  let available = result.lines.length > 0;
+  if (
+    available &&
+    !hasRomanizableLyrics(result.lines, result.language)
+  ) {
     console.log(
-      "[Scriptify] Lyrics already in Latin script — disabling button",
+      "[Scriptify] Lyrics are already Latin or in an unsupported script — disabling button",
     );
     available = false;
   }
-  if (available !== lyricsAvailable) {
+  if (available !== lyricsAvailable || force) {
     lyricsAvailable = available;
     for (const cb of availabilityCallbacks) {
       try {
@@ -1041,29 +1278,37 @@ export async function checkInitialLyricsAvailability(): Promise<void> {
     }
   }
   if (currentTrackId) {
-    // Force notification even on first check (lyricsAvailable default is true,
-    // but we need to notify if the track actually has no lyrics)
-    const lyrics = await fetchSpotifyLyrics(currentTrackId);
-    let available = lyrics !== null && lyrics.length > 0;
-    if (available && lyrics && areLyricsAlreadyRomanized(lyrics)) {
-      console.log(
-        "[Scriptify] Initial track lyrics already in Latin script — disabling button",
-      );
-      available = false;
-    }
-    lyricsAvailable = available;
-    for (const cb of availabilityCallbacks) {
-      try {
-        cb(available);
-      } catch {}
+    // Force notification even on first check (lyricsAvailable defaults to true,
+    // but we need to notify if the track actually has no usable lyrics)
+    const info = getCurrentTrackInfo();
+    if (info?.id === currentTrackId) {
+      await checkAndNotifyAvailability(info, true);
     }
   }
 }
 
 export function destroyLyricsInterceptor(): void {
+  isDestroyed = true;
+  stateGeneration++;
+  cancelPendingSongChangeTimeouts();
   stopContinuousReplacement();
   removeAllRomanized();
   forwardMap.clear();
   modeChangeCallbacks = [];
   availabilityCallbacks = [];
+
+  // Drop the Spicetify subscriptions, otherwise a reload leaves the previous
+  // instance's handlers running alongside the new one's.
+  if (songChangeHandler) {
+    try {
+      Spicetify.Player.removeEventListener("songchange", songChangeHandler);
+    } catch {}
+    songChangeHandler = null;
+  }
+  if (historyUnsubscribe) {
+    try {
+      historyUnsubscribe();
+    } catch {}
+    historyUnsubscribe = null;
+  }
 }
