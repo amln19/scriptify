@@ -16,7 +16,7 @@
 
 import { LyricsMode } from "./types";
 import { injectStyles, removeStyles } from "./components/styles";
-import { showSettings } from "./components/ToggleButton";
+import { showSettings } from "./components/settingsPanel";
 import {
   initLyricsInterceptor,
   loadSavedMode,

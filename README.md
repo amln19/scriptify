@@ -8,7 +8,7 @@ A Spicetify extension that adds a custom lyrics toggle to Spotify, enabling swit
 - **12+ writing systems** — Devanagari, Gurmukhi, Bengali, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam, Japanese (Hiragana/Katakana), Korean (Hangul), Chinese (Hanzi)
 - **Purpose-built Hindi romanizer** — direct Devanagari → Hinglish parser with schwa deletion, nuqta handling, and a 500+ word lookup dictionary for natural results (bypasses IAST entirely)
 - **Playbar integration** — button sits in the bottom-right now-playing bar, right next to the native lyrics/queue/volume controls
-- **Simple keyboard shortcuts** — `Ctrl+Shift+L` to toggle modes, `Ctrl+Shift+;` for settings, `Ctrl+Shift+J` to jump to the current line
+- **Simple keyboard shortcuts** — `Ctrl/Cmd+Shift+L` to toggle modes, `Ctrl/Cmd+Shift+;` for settings, `Ctrl/Cmd+Shift+J` to jump to the current line
 - **Persistent preferences** — mode choice is saved across sessions
 - **~Zero flash** — a narrow MutationObserver + 100ms interval engine re-applies replacements before React re-renders can flash the original script
 - **Graceful degradation** — if romanization fails, the extension silently falls back to original lyrics with no visible errors
@@ -16,7 +16,7 @@ A Spicetify extension that adds a custom lyrics toggle to Spotify, enabling swit
 ## Tech Stack
 
 - **TypeScript** — strict mode, full type coverage
-- **esbuild** — bundled as a single IIFE file (~236kb) for Spicetify's extension loader
+- **esbuild** — bundled as a single minified IIFE file for Spicetify's extension loader
 - **Spicetify API** — `Playbar.Button`, `PopupModal`, `CosmosAsync`, `Player` events, `LocalStorage`, `Platform.History`
 - **@indic-transliteration/sanscript** — IAST transliteration for non-Hindi Indic scripts (Tamil, Bengali, Gujarati, etc.)
 - **Spotify Internal Lyrics API** — `spclient.wg.spotify.com/color-lyrics/v2` for full lyrics + language detection
@@ -46,7 +46,7 @@ A Spicetify extension that adds a custom lyrics toggle to Spotify, enabling swit
    npm run build
    ```
 
-   This outputs `dist/scriptify.js` (~236kb).
+   This outputs `dist/scriptify.js`.
 
 3. **Copy to Spicetify extensions folder:**
 
@@ -121,11 +121,18 @@ No environment variables or API keys are required. All external APIs used (LRCLI
 src/
 ├── app.tsx                     # Entry point — waits for Spicetify, registers Playbar.Button
 ├── components/
-│   ├── ToggleButton.ts         # Settings panel (mode selector)
+│   ├── settingsPanel.ts        # Settings modal and fallback overlay
 │   └── styles.ts               # Runtime CSS injection
 ├── services/
 │   ├── lyricsInterceptor.ts    # Core orchestrator — DOM detection, replacement maps, MutationObserver engine
-│   ├── romanizer.ts            # Multi-script romanization (direct Hindi parser + Sanscript IAST + CJK/Japanese/Korean)
+│   ├── romanizer.ts            # Public multi-script router
+│   ├── romanizer/              # Language-specific romanization engines
+│   │   ├── hindi.ts             # Direct Devanagari parser and word dictionaries
+│   │   ├── indic.ts             # Sanscript pipeline and Indic exceptions
+│   │   ├── gurmukhi.ts          # Direct Punjabi parser
+│   │   ├── japanese.ts          # Kana to romaji
+│   │   ├── korean.ts            # Hangul decomposition and liaison rules
+│   │   └── chinese.ts           # Offline common-character pinyin map
 │   └── lrclib.ts               # LRCLIB lyrics API client (fallback lyrics source)
 ├── utils/
 │   └── scriptDetector.ts       # Unicode range analysis for writing system (script) detection

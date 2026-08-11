@@ -1,8 +1,11 @@
 {
   "name": "scriptify",
   "version": "1.0.0",
+  "private": true,
   "description": "Spicetify extension: Toggle lyrics between Original and Romanized scripts",
-  "main": "dist/scriptify.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "node build.js",
     "watch": "node build.js --watch",
@@ -14,8 +17,6 @@
     "type": "git",
     "url": "git+https://github.com/amln19/scriptify.git"
   },
-  "keywords": [],
-  "author": "",
   "license": "MIT",
   "type": "commonjs",
   "bugs": {
