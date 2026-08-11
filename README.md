@@ -1,28 +1,23 @@
 # Scriptify
 
-A Spicetify extension that adds a custom lyrics toggle to Spotify, enabling switching between **Original** and **Romanized** lyrics with a single click. The problem: Spotify only shows lyrics in their original script, at least for the desktop app, which isn't helpful if you can't read Devanagari, Hangul, or Kanji. Scriptify fixes that.
+Spotify lyrics are often displayed only in the script they were written in. If you can’t read Devanagari, Hangul, Kanji, or other supported scripts, singing along can be difficult. Scriptify adds a one-click toggle that switches lyrics between **Original** and **Romanized** text, so you can follow the words without losing the original.
 
 ## Features
 
 - **Lyrics toggle** — switch between Original and Romanized (Latin transliteration) modes
-- **12+ writing systems** — Devanagari, Gurmukhi, Bengali, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam, Japanese (Hiragana/Katakana), Korean (Hangul), Chinese (Hanzi)
-- **Purpose-built Hindi romanizer** — direct Devanagari → Hinglish parser with schwa deletion, nuqta handling, and a 500+ word lookup dictionary for natural results (bypasses IAST entirely)
+- **12 supported script families** — Devanagari, Gurmukhi, Bengali, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam, Japanese (Hiragana/Katakana), Korean (Hangul), and Chinese (Hanzi)
+- **Curated Hindi romanizer** — direct Devanagari → Hinglish parser with schwa deletion, nuqta handling, and a curated Hindi word dictionary for natural results (bypasses IAST entirely)
 - **Playbar integration** — button sits in the bottom-right now-playing bar, right next to the native lyrics/queue/volume controls
 - **Simple keyboard shortcuts** — `Ctrl/Cmd+Shift+L` to toggle modes, `Ctrl/Cmd+Shift+;` for settings, `Ctrl/Cmd+Shift+J` to jump to the current line
 - **Persistent preferences** — mode choice is saved across sessions
 - **~Zero flash** — a narrow MutationObserver + 100ms interval engine re-applies replacements before React re-renders can flash the original script
 - **Graceful degradation** — if romanization fails, the extension silently falls back to original lyrics with no visible errors
 
-## Tech Stack
-
-- **TypeScript** — strict mode, full type coverage
-- **esbuild** — bundled as a single minified IIFE file for Spicetify's extension loader
-- **Spicetify API** — `Playbar.Button`, `PopupModal`, `CosmosAsync`, `Player` events, `LocalStorage`, `Platform.History`
-- **@indic-transliteration/sanscript** — IAST transliteration for non-Hindi Indic scripts (Tamil, Bengali, Gujarati, etc.)
-- **Spotify Internal Lyrics API** — `spclient.wg.spotify.com/color-lyrics/v2` for full lyrics + language detection
-- **LRCLIB API** — fallback lyrics source when Spotify's API is unavailable
-
 ## Getting Started
+
+### Marketplace installation
+
+Search for **Scriptify** in the Spicetify Marketplace's **Extensions** tab and click **Install**.
 
 ### Prerequisites
 
@@ -30,7 +25,7 @@ A Spicetify extension that adds a custom lyrics toggle to Spotify, enabling swit
 - **Spotify** desktop app
 - **[Spicetify CLI](https://spicetify.app/docs/getting-started)** installed and configured (`spicetify backup apply` run at least once)
 
-### Installation
+### Manual installation
 
 1. **Clone the repo and install dependencies:**
 
@@ -67,6 +62,13 @@ A Spicetify extension that adds a custom lyrics toggle to Spotify, enabling swit
 
 5. **Restart Spotify** — the Scriptify button appears in the playbar.
 
+### Uninstalling
+
+```bash
+spicetify config extensions scriptify.js-
+spicetify apply
+```
+
 ### Development
 
 For auto-rebuilding on file changes:
@@ -90,7 +92,7 @@ Other scripts:
 | `npm run watch`     | Dev build with file watching (unminified, inline sourcemaps) |
 | `npm run typecheck` | Run TypeScript type checking                                 |
 | `npm test`          | Run deterministic unit and regression tests                  |
-| `npm run clean`     | Remove the `dist/` directory                                 |
+| `npm run clean`     | Remove the `dist/` directory; run `npm run build` before publishing again |
 
 ### Testing
 
@@ -104,16 +106,30 @@ The live Spotify/Spicetify integration still needs manual smoke testing after
 Spotify updates: check a few supported scripts, rapid track/mode changes,
 lyrics-panel close/reopen, playbar controls, settings, and keyboard shortcuts.
 
-## Environment Variables
-
-No environment variables or API keys are required. All external APIs used (LRCLIB, Spotify internal) are free and unauthenticated.
-
 ## Usage
 
 - **Left-click** the Scriptify button in the playbar to toggle: Original ↔ Romanized
 - **Right-click** the button to open the settings panel
 - The button glows green when Romanized mode is active
-- On songs without lyrics, the button is grayed out like the lyrics button
+- On tracks without usable romanizable lyrics, the button is disabled
+
+## Tech Stack
+
+- **TypeScript** — strict mode, full type coverage
+- **esbuild** — bundled as a single minified IIFE file for Spicetify's extension loader
+- **Spicetify API** — `Playbar.Button`, `PopupModal`, `CosmosAsync`, `Player` events, `LocalStorage`, `Platform.History`
+- **@indic-transliteration/sanscript** — IAST transliteration for non-Hindi Indic scripts (Tamil, Bengali, Gujarati, etc.)
+- **Spotify internal lyrics API** — `spclient.wg.spotify.com/color-lyrics/v2` for full lyrics and language detection, using the active Spotify session
+- **LRCLIB API** — public, no-key fallback lyrics source when Spotify's API is unavailable
+
+No API keys or environment variables are required.
+
+## Limitations
+
+- Romanization is available only for the script families listed above.
+- Unsupported scripts are left unchanged; tracks with no romanizable lines disable the toggle.
+- Chinese romanization uses an offline map of 250+ common characters; unmapped characters pass through unchanged.
+- Japanese and Korean ideographs are treated as kanji/hanja when kana or Hangul identifies the line's language; there is no kanji reading dictionary.
 
 ## Architecture
 
@@ -135,7 +151,8 @@ src/
 │   │   └── chinese.ts           # Offline common-character pinyin map
 │   └── lrclib.ts               # LRCLIB lyrics API client (fallback lyrics source)
 ├── utils/
-│   └── scriptDetector.ts       # Unicode range analysis for writing system (script) detection
+│   ├── async.ts                # Shared timeout and async helpers
+│   └── scriptDetector.ts       # Unicode range analysis for writing system detection
 ├── types/
 │   ├── index.ts                # Core types (LyricsMode, LyricLine, TrackInfo, LRCLibResponse)
 │   └── spicetify.d.ts          # Spicetify global type declarations
@@ -154,13 +171,13 @@ src/
 
 | Script                                                     | Method                                                                               |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Devanagari (Hindi, language identified)                    | Direct syllable parser with schwa deletion, nuqta handling, and 500+ word dictionary |
+| Devanagari (Hindi, language identified)                    | Direct syllable parser with schwa deletion, nuqta handling, and a curated word dictionary |
 | Devanagari (Marathi, Sanskrit, Nepali, or unknown fallback) | Sanscript → IAST → diacritic stripping → Hinglish conventions                        |
 | Gurmukhi (Punjabi)                                         | Direct syllable parser with schwa deletion and addak (gemination) support            |
 | Tamil, Bengali, Telugu, Kannada, Gujarati, Malayalam, Odia | Sanscript → IAST → diacritic stripping                                               |
 | Japanese (Hiragana/Katakana)                               | Built-in romaji lookup tables with compound kana and sokuon support                  |
 | Korean (Hangul)                                            | Hangul syllable decomposition with common liaison and palatalization rules           |
-| Chinese (CJK)                                              | Built-in pinyin map (250 common characters; others pass through unchanged)           |
+| Chinese (CJK)                                              | Built-in pinyin map (250+ common characters; others pass through unchanged)          |
 
 Ideographs inside a Japanese or Korean line are treated as kanji/hanja rather than
 hanzi, so they are never given Mandarin readings; they are left as-is (there is no
