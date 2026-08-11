@@ -14,13 +14,6 @@
     "declaration": false,
     "outDir": "./dist",
     "rootDir": "./src",
-    "baseUrl": ".",
-    "paths": {
-      "@services/*": ["src/services/*"],
-      "@components/*": ["src/components/*"],
-      "@utils/*": ["src/utils/*"],
-      "@types/*": ["src/types/*"]
-    },
     "lib": ["ES2020", "DOM", "DOM.Iterable"]
   },
   "include": ["src/**/*"],
